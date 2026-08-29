@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: English user guide
+    url: https://github.com/jameslu34/ha-platform-sync/blob/main/docs/USER_GUIDE.en.md
+    about: Read setup instructions and troubleshooting before opening an issue.
+  - name: 繁體中文使用手冊
+    url: https://github.com/jameslu34/ha-platform-sync/blob/main/docs/USER_GUIDE.zh-Hant.md
+    about: 開啟 Issue 前，請先查看完整設定說明與常見問題。
+  - name: Security vulnerability
+    url: https://github.com/jameslu34/ha-platform-sync/security/advisories/new
+    about: Report security vulnerabilities privately. Do not disclose them in a public issue.

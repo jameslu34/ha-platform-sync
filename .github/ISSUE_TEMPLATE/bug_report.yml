@@ -1,0 +1,90 @@
+name: Bug report
+description: Report reproducible behavior that does not work as expected
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Remove passwords, tokens, cookies, private keys, API keys, private host names, and household details before submitting.
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I am using the latest published version.
+          required: true
+        - label: I created a Home Assistant backup before reproducing a platform-write issue.
+          required: true
+        - label: This report contains no secrets or unredacted diagnostics.
+          required: true
+  - type: input
+    id: integration-version
+    attributes:
+      label: Integration version
+      placeholder: 0.6.0
+    validations:
+      required: true
+  - type: input
+    id: home-assistant-version
+    attributes:
+      label: Home Assistant version
+      placeholder: 2026.x.y
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Synchronization source
+      options:
+        - Home Assistant dashboard views
+        - Manually selected entities
+        - Google Home
+        - HomeKit
+        - Matterbridge
+        - Synchronization is disabled
+    validations:
+      required: true
+  - type: checkboxes
+    id: targets
+    attributes:
+      label: Selected targets
+      options:
+        - label: Google Home
+        - label: HomeKit
+        - label: Matterbridge
+        - label: None; synchronization is disabled
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest safe sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or diagnostics
+      description: Optional. Redact all credentials, private addresses, entity IDs, device names, and household information.
+      render: text
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
