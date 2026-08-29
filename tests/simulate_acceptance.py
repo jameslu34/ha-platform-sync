@@ -283,6 +283,74 @@ async def main() -> None:
         "target-specific locked exclusion",
     )
 
+    exact = models.evaluate_target(
+        frozenset(
+            {
+                "light.from_source",
+                "light.user_excluded",
+                "input_boolean.locked_excluded",
+            }
+        ),
+        frozenset(
+            {
+                "light.from_source",
+                "light.target_only",
+                "light.user_excluded",
+                "switch.user_included",
+                "input_boolean.locked_excluded",
+            }
+        ),
+        Rule(
+            include=frozenset({"switch.user_included"}),
+            exclude=frozenset(
+                {"light.user_excluded", "input_boolean.locked_required"}
+            ),
+        ),
+        Rule(
+            include=frozenset({"input_boolean.locked_required"}),
+            exclude=frozenset({"input_boolean.locked_excluded"}),
+        ),
+        Target.GOOGLE,
+    )
+    check(
+        exact.desired
+        == {
+            "light.from_source",
+            "switch.user_included",
+            "input_boolean.locked_required",
+        },
+        "exact desired set applies per-target include/exclude before locked policy",
+    )
+    check(
+        exact.added == {"input_boolean.locked_required"},
+        "locked required exposure is restored even when absent from the source",
+    )
+    check(
+        exact.removed
+        == {
+            "light.target_only",
+            "light.user_excluded",
+            "input_boolean.locked_excluded",
+        },
+        "target-only and excluded exposures are all included in the removal plan",
+    )
+    try:
+        models.TargetPlan(
+            platform=Target.GOOGLE,
+            desired=frozenset({"light.from_source"}),
+            current=frozenset({"light.from_source", "light.target_only"}),
+            added=frozenset(),
+            removed=frozenset(),
+        )
+    except ValueError:
+        exact_delta_rejected = True
+    else:
+        exact_delta_rejected = False
+    check(
+        exact_delta_rejected,
+        "a target plan cannot omit a current exposure outside its desired set",
+    )
+
     # Disabled must short-circuit before source evaluation or target writes.
     reads = writes = 0
     enabled = False
@@ -316,7 +384,7 @@ async def main() -> None:
     preview_writes = 0
     check(preview_reads == 1 and preview_writes == 0, "explicit preview remains read-only")
 
-    print("PASS: 23 simulated acceptance assertions")
+    print("PASS: 27 simulated acceptance assertions")
 
 
 if __name__ == "__main__":
