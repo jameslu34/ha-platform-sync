@@ -53,6 +53,11 @@ The integration compares the source with each selected target:
 - If an update fails, the integration attempts to restore the previous
   settings.
 
+Each selected target converges to an exact set: `(source - exclusions) ∪
+always-included devices`, followed by compatibility and protected rules. An
+existing exposure is removed even if it predates this integration when it is
+outside the final set. Unselected targets are left unchanged.
+
 ### What it does not do
 
 The integration does not:
@@ -352,6 +357,12 @@ the `matterbridge-hass` plugin.
 ## Use additions and exclusions
 
 Each selected target has its own exceptions.
+
+Except for always-included devices and protected rules, every existing
+exposure on a selected target that is absent from the source is removed.
+Excluded devices stay absent even when they are in the source. Removal only
+changes integration-managed exposure settings; it does not delete a Home
+Assistant entity or remove a native platform pairing.
 
 ### Always include
 
