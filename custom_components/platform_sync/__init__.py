@@ -1,0 +1,208 @@
+"""Platform Sync integration."""
+
+from __future__ import annotations
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.helpers import entity_registry as er
+
+from .config import SyncConfig, normalize_dashboard_pages
+from .const import (
+    CONF_ENABLED,
+    CONF_HOMEKIT_MANAGED_ENTRY_IDS,
+    CONF_HOMEKIT_SOURCE_ENTRY_IDS,
+    CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION,
+    CONF_LOCKED_RULES,
+    CONF_SOURCE_DASHBOARD,
+    CONF_SOURCE_KIND,
+    CONF_SOURCE_PAGES,
+    CONF_SOURCE_VIEW,
+    CONF_TARGET_PLATFORMS,
+    DEFAULT_SOURCE_DASHBOARD,
+    DEFAULT_SOURCE_VIEW,
+    DEFAULT_ENTRY_TITLE_EN,
+    DEFAULT_ENTRY_TITLE_ZH_HANT,
+    DOMAIN,
+    LEGACY_CONF_AUTO_APPLY,
+    LEGACY_CONF_DEBOUNCE_SECONDS,
+    LEGACY_CONF_HOME_PRESENCE_PROTECTION,
+    LEGACY_CONF_POLL_SECONDS,
+    LEGACY_CONF_PROFILE_NAME,
+    PLATFORMS,
+    SERVICE_PREVIEW,
+    SERVICE_SYNC_NOW,
+    SourceKind,
+    TargetPlatform,
+)
+from .manager import PlatformSyncManager
+from .models import parse_rules, serialize_rules
+
+type PlatformSyncConfigEntry = ConfigEntry[PlatformSyncManager]
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant, entry: PlatformSyncConfigEntry
+) -> bool:
+    """Migrate to one master switch, multi-page, and exact HomeKit sources."""
+    if entry.version > 4 or (entry.version == 4 and entry.minor_version > 3):
+        return False
+    if entry.version == 4 and entry.minor_version == 3:
+        return True
+
+    data = dict(entry.data)
+    options = dict(entry.options)
+    merged = {**data, **options}
+    if entry.version < 2:
+        targets = set(merged.get(CONF_TARGET_PLATFORMS, []))
+        if (
+            TargetPlatform.HOMEKIT.value in targets
+            and not merged.get(CONF_HOMEKIT_MANAGED_ENTRY_IDS)
+        ):
+            # Snapshot only the entries present during this one-time migration.
+            # Future HomeKit entries are never adopted implicitly.
+            snapshot = [
+                item.entry_id for item in hass.config_entries.async_entries("homekit")
+            ]
+            if CONF_HOMEKIT_MANAGED_ENTRY_IDS in options:
+                options[CONF_HOMEKIT_MANAGED_ENTRY_IDS] = snapshot
+            else:
+                data[CONF_HOMEKIT_MANAGED_ENTRY_IDS] = snapshot
+
+    if entry.version < 3:
+        # Keep any immutable rules already stored by a pre-release build, but
+        # do not ship deployment-specific entity identifiers in public code.
+        locked_rules = parse_rules(data.get(CONF_LOCKED_RULES))
+        data[CONF_LOCKED_RULES] = serialize_rules(locked_rules)
+
+        # Old preview mode must never turn into automatic writes. Only legacy
+        # configurations whose two gates were both on become enabled.
+        enabled = bool(merged.get(CONF_ENABLED, False))
+        if entry.version < 2:
+            enabled = False
+        elif LEGACY_CONF_AUTO_APPLY in data or LEGACY_CONF_AUTO_APPLY in options:
+            enabled = enabled and bool(merged.get(LEGACY_CONF_AUTO_APPLY, False))
+        data.pop(CONF_ENABLED, None)
+        options[CONF_ENABLED] = enabled
+
+    # Remove every retired UI key from both storage layers.
+    for key in (
+        LEGACY_CONF_AUTO_APPLY,
+        LEGACY_CONF_HOME_PRESENCE_PROTECTION,
+        LEGACY_CONF_DEBOUNCE_SECONDS,
+        LEGACY_CONF_POLL_SECONDS,
+        LEGACY_CONF_PROFILE_NAME,
+    ):
+        data.pop(key, None)
+        options.pop(key, None)
+
+    merged = {**data, **options}
+    if CONF_SOURCE_PAGES not in merged:
+        pages = normalize_dashboard_pages(
+            None,
+            fallback_dashboard=str(
+                merged.get(CONF_SOURCE_DASHBOARD, DEFAULT_SOURCE_DASHBOARD)
+            ),
+            fallback_view=str(merged.get(CONF_SOURCE_VIEW, DEFAULT_SOURCE_VIEW)),
+        )
+        options[CONF_SOURCE_PAGES] = [
+            {"dashboard": dashboard, "view": view}
+            for dashboard, view in pages
+        ]
+
+    # Schema 4.1 read every HomeKit Config Entry as one implicit source.  Take
+    # one explicit snapshot during migration so later HomeKit additions are
+    # never adopted without the user's selection.  Source ownership remains
+    # separate from the managed target-entry list above.
+    merged = {**data, **options}
+    if (
+        merged.get(CONF_SOURCE_KIND) == SourceKind.HOMEKIT.value
+        and CONF_HOMEKIT_SOURCE_ENTRY_IDS not in merged
+    ):
+        source_snapshot = [
+            item.entry_id for item in hass.config_entries.async_entries("homekit")
+        ]
+        options[CONF_HOMEKIT_SOURCE_ENTRY_IDS] = source_snapshot
+        if bool(merged.get(CONF_ENABLED, False)) and not source_snapshot:
+            # An enabled HomeKit source with no exact entry selection cannot be
+            # evaluated safely.  Disable only the master switch and preserve
+            # every other source, target, and exception setting.
+            data.pop(CONF_ENABLED, None)
+            options[CONF_ENABLED] = False
+
+    # Private pre-release builds always excluded Apple TV integration entities
+    # from HomeKit targets. Preserve that behavior for their existing entries
+    # without making it a hidden default for new public installations.
+    data.setdefault(CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION, True)
+
+    language = (
+        str(getattr(hass.config, "language", "en"))
+        .casefold()
+        .replace("_", "-")
+    )
+    is_zh_hant = language in {"zh-hant", "zh-tw", "zh-hk", "zh-mo"} or language.startswith(
+        "zh-hant-"
+    )
+    title = DEFAULT_ENTRY_TITLE_ZH_HANT if is_zh_hant else DEFAULT_ENTRY_TITLE_EN
+
+    hass.config_entries.async_update_entry(
+        entry,
+        data=data,
+        options=options,
+        title=title,
+        version=4,
+        minor_version=3,
+    )
+    return True
+
+
+def _remove_legacy_entities(hass: HomeAssistant, entry: PlatformSyncConfigEntry) -> None:
+    """Remove the retired status and manual-action registry rows by unique ID."""
+    registry = er.async_get(hass)
+    for entity_domain, suffix in (("sensor", "status"), ("button", "sync_now")):
+        entity_id = registry.async_get_entity_id(
+            entity_domain, DOMAIN, f"{entry.entry_id}_{suffix}"
+        )
+        if entity_id is not None:
+            registry.async_remove(entity_id)
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Set up service actions."""
+    async def handle(call: ServiceCall) -> dict:
+        results = {}
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            if entry.runtime_data:
+                apply = call.service == SERVICE_SYNC_NOW
+                results[entry.title] = await entry.runtime_data.async_reconcile(
+                    reason=f"service_{call.service}", apply=apply
+                )
+        return results
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_PREVIEW, handle, supports_response=SupportsResponse.ONLY
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_SYNC_NOW, handle, supports_response=SupportsResponse.OPTIONAL
+    )
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: PlatformSyncConfigEntry) -> bool:
+    """Set up the synchronization configuration."""
+    _remove_legacy_entities(hass, entry)
+    manager = PlatformSyncManager(
+        hass, SyncConfig.from_entry(entry.data, entry.options), entry
+    )
+    entry.runtime_data = manager
+    await manager.async_start()
+    if PLATFORMS:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: PlatformSyncConfigEntry) -> bool:
+    """Unload without changing any platform exposure."""
+    await entry.runtime_data.async_stop()
+    if not PLATFORMS:
+        return True
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

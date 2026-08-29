@@ -1,0 +1,13 @@
+{
+  "domain": "platform_sync",
+  "name": "Cross-Platform Device Sync",
+  "version": "0.6.0",
+  "config_flow": true,
+  "iot_class": "local_push",
+  "integration_type": "service",
+  "single_config_entry": true,
+  "documentation": "https://github.com/jameslu34/ha-platform-sync",
+  "issue_tracker": "https://github.com/jameslu34/ha-platform-sync/issues",
+  "codeowners": ["@jameslu34"],
+  "requirements": []
+}
