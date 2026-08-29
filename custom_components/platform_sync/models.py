@@ -82,6 +82,15 @@ class TargetPlan:
     removed: frozenset[str]
     metadata_updates: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Reject plans whose delta is not an exact desired/current difference."""
+        expected_added = self.desired - self.current
+        expected_removed = self.current - self.desired
+        if self.added != expected_added or self.removed != expected_removed:
+            raise ValueError(
+                "TargetPlan added/removed sets must exactly match desired/current"
+            )
+
     @property
     def changed(self) -> bool:
         """Return whether applying the plan changes the target."""
@@ -121,15 +130,21 @@ def evaluate_target(
     platform: TargetPlatform,
     dynamic_exclude: frozenset[str] = frozenset(),
 ) -> TargetPlan:
-    """Apply normal rules, then non-overridable locked policy rules."""
+    """Build an exact target plan, then apply locked policy rules last.
+
+    The selected target converges to ``(source - user exclude) | user include``.
+    Locked and dynamic protection is applied only after that generic rule, and
+    every currently exposed entity outside the final desired set is included in
+    ``removed``.  Removing an exposure never deletes the Home Assistant entity.
+    """
     locked_exclude = locked_rule.exclude | dynamic_exclude
     conflict = locked_rule.include & locked_exclude
     if conflict:
         names = ", ".join(sorted(conflict))
         raise ValueError(f"Locked include/exclude conflict: {names}")
 
-    desired = (source_entities - user_rule.exclude) | user_rule.include
-    desired = (desired - locked_exclude) | locked_rule.include
+    generic_desired = (source_entities - user_rule.exclude) | user_rule.include
+    desired = (generic_desired - locked_exclude) | locked_rule.include
     desired = frozenset(desired)
     return TargetPlan(
         platform=platform,
