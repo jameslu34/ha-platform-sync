@@ -51,6 +51,7 @@ def install_stubs() -> None:
     const = ModuleType("homeassistant.const")
     core = ModuleType("homeassistant.core")
     helpers = ModuleType("homeassistant.helpers")
+    config_validation = ModuleType("homeassistant.helpers.config_validation")
     dispatcher = ModuleType("homeassistant.helpers.dispatcher")
     event = ModuleType("homeassistant.helpers.event")
     entity_registry = ModuleType("homeassistant.helpers.entity_registry")
@@ -91,10 +92,14 @@ def install_stubs() -> None:
     core.ServiceCall = object
     core.SupportsResponse = SupportsResponse
     core.callback = lambda function: function
+    config_validation.config_entry_only_config_schema = (
+        lambda domain: ("config_entry_only", domain)
+    )
     dispatcher.async_dispatcher_connect = lambda *_args, **_kwargs: lambda: None
     event.async_track_time_interval = lambda *_args, **_kwargs: lambda: None
     entity_registry.EVENT_ENTITY_REGISTRY_UPDATED = "entity_registry_updated"
     helpers.entity_registry = entity_registry
+    helpers.config_validation = config_validation
     helpers.dispatcher = dispatcher
     lovelace_const.EVENT_LOVELACE_UPDATED = "lovelace_updated"
     yaml_module.load_yaml = lambda _path: {}
@@ -109,6 +114,7 @@ def install_stubs() -> None:
             "homeassistant.const": const,
             "homeassistant.core": core,
             "homeassistant.helpers": helpers,
+            "homeassistant.helpers.config_validation": config_validation,
             "homeassistant.helpers.dispatcher": dispatcher,
             "homeassistant.helpers.event": event,
             "homeassistant.helpers.entity_registry": entity_registry,
@@ -188,6 +194,15 @@ class FakeHass:
 def check(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def check_config_entry_only_schema() -> int:
+    """Require YAML setup to fail closed in favor of the config flow."""
+    check(
+        integration_module.CONFIG_SCHEMA == ("config_entry_only", const.DOMAIN),
+        "integration declares a config-entry-only schema",
+    )
+    return 1
 
 
 async def check_homekit_adapter() -> int:
@@ -3079,6 +3094,7 @@ async def check_diagnostics_privacy() -> int:
 
 async def main() -> None:
     assertions = 0
+    assertions += check_config_entry_only_schema()
     assertions += await check_homekit_adapter()
     assertions += check_matter_runtime()
     assertions += check_matter_exact_configuration()
