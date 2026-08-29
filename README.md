@@ -116,6 +116,13 @@ For every selected target, the final set is calculated in this order:
 3. dynamic compatibility exclusions
 4. installation-managed locked rules, when present
 
+In set form, the generic rule is `(source - exclusions) ∪ additions`, followed
+by compatibility and protected deployment rules. Every existing exposure that
+is outside that final set is removed from the selected target. Unselected
+targets are left unchanged. Removal changes only the integration-managed
+exposure configuration; it never deletes the Home Assistant entity or removes
+a native platform pairing.
+
 Rapid source events are combined for two seconds. Every enabled configuration
 runs one full source scan when Home Assistant or the integration starts.
 Dashboard and HomeKit sources use change events where possible. Google Home and
