@@ -320,6 +320,24 @@ def main() -> None:
             "enabled",
             "source_kind",
         }
+        en_target_description = documents["en"][section]["step"]["targets"][
+            "description"
+        ]
+        zh_target_description = documents["zh-Hant"][section]["step"]["targets"][
+            "description"
+        ]
+        en_confirm_description = documents["en"][section]["step"]["confirm"][
+            "description"
+        ]
+        zh_confirm_description = documents["zh-Hant"][section]["step"]["confirm"][
+            "description"
+        ]
+        assert "exact final set" in en_target_description
+        assert "existing exposures" in en_target_description
+        assert "精確最終清單" in zh_target_description
+        assert "既有曝光會移除" in zh_target_description
+        assert "unselected targets stay unchanged" in en_confirm_description
+        assert "未勾選平台維持不變" in zh_confirm_description
 
     manifest = load_json(COMPONENT / "manifest.json")
     assert manifest["name"] == "Cross-Platform Device Sync"
