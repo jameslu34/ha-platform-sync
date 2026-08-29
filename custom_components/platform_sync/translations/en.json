@@ -1,0 +1,278 @@
+{
+  "title": "Cross-Platform Device Sync",
+  "config": {
+    "abort": {
+      "already_configured": "Cross-Platform Device Sync is already configured."
+    },
+    "error": {
+      "required": "This field is required.",
+      "dashboard_not_found": "One or more selected dashboard views could not be read. Choose again or enter a path manually.",
+      "dashboard_required": "Select at least one dashboard view.",
+      "dashboard_selection_conflict": "Manual path entry cannot be selected together with dashboard views.",
+      "empty_source": "The selected source contains no entities. Choose a non-empty source to prevent unintended removals.",
+      "entity_required": "Select at least one entity.",
+      "entity_not_found": "One or more selected entities no longer exist.",
+      "target_required": "Select at least one target platform.",
+      "invalid_target": "One or more target platforms are invalid.",
+      "invalid_path": "Enter a relative YAML path inside the Home Assistant configuration directory.",
+      "homekit_entry_required": "Select at least one HomeKit Bridge or Accessory.",
+      "homekit_source_entry_required": "Select at least one HomeKit Bridge or Accessory as the source.",
+      "homekit_source_entry_not_found": "One or more selected HomeKit source entries no longer exist. Choose from the current integration entries.",
+      "homekit_source_entry_unavailable": "One or more selected HomeKit source entries are not loaded. Resolve the integration issue before continuing.",
+      "homekit_source_filter_unsupported": "One or more selected HomeKit source entries cannot be read as an exact entity set. Configure an explicit entity list before continuing.",
+      "invalid_port": "Enter a port between 1 and 65535.",
+      "include_exclude_conflict": "The same entity cannot be both added and excluded.",
+      "protected_rule_conflict": "This selection conflicts with a protected deployment rule.",
+      "google_setup_required": "Google Assistant is not ready for exact synchronization. Complete the integration, account link, dedicated device file, default exposure, and Request Sync setup.",
+      "homekit_setup_required": "HomeKit is not ready. Check the selected Bridge and Accessory entries and ensure they are loaded.",
+      "matter_setup_required": "Matterbridge is not ready. Check its connection and Home Assistant plugin.",
+      "platform_unavailable": "A selected source or target platform is not ready. Check its integration and try again."
+    },
+    "step": {
+      "user": {
+        "title": "Choose a synchronization source",
+        "data": {
+          "enabled": "Enable synchronization",
+          "source_kind": "Synchronization source"
+        },
+        "data_description": {
+          "enabled": "Enable cross-platform synchronization."
+        }
+      },
+      "dashboard": {
+        "title": "Choose dashboard views",
+        "description": "Select one or more dashboard views whose devices should become the synchronization source.",
+        "data": {
+          "source_page": "Dashboard views"
+        },
+        "data_description": {
+          "source_page": "Multiple selections are supported. The list shows each readable dashboard and view name together with its path."
+        }
+      },
+      "dashboard_path": {
+        "title": "Enter a dashboard path",
+        "description": "Use this fallback when a dashboard page cannot be listed automatically.",
+        "data": {
+          "source_dashboard": "Dashboard URL path",
+          "source_view": "Page URL path"
+        },
+        "data_description": {
+          "source_dashboard": "For example: lovelace.",
+          "source_view": "For example: default-view."
+        }
+      },
+      "manual": {
+        "title": "Choose source entities",
+        "description": "Select one or more entities as the synchronization source.",
+        "data": {
+          "source_entities": "Entities"
+        },
+        "data_description": {
+          "source_entities": "At least one existing entity is required."
+        }
+      },
+      "homekit_source": {
+        "title": "Select HomeKit Bridges and Accessories to sync",
+        "description": "Directly check one or more Home Assistant HomeKit Bridges or Accessories to use as the read-only synchronization source. This list does not represent accessories paired natively in Apple Home.",
+        "data": {
+          "homekit_source_entry_ids": "HomeKit Bridges and Accessories"
+        },
+        "data_description": {
+          "homekit_source_entry_ids": "Check one or more items directly. The integration reads only the selected entries; this selection does not grant permission to update them."
+        }
+      },
+      "targets": {
+        "title": "Choose target platforms",
+        "description": "Select one or more platforms that should receive the source device set. Only selected targets show target-specific additions and exclusions; a source-only platform may still show required connection fields.",
+        "data": {
+          "target_platforms": "Target platforms"
+        },
+        "data_description": {
+          "target_platforms": "A platform not selected as a target is not validated or synchronized as a target. If it is the source, its required connection settings and monitoring still apply."
+        }
+      },
+      "platform_settings": {
+        "title": "Configure selected platforms",
+        "description": "Only settings required by the source and selected target platforms are shown.\n\n{prerequisites}",
+        "data": {
+          "google_config_path": "Google Assistant device configuration file",
+          "homekit_managed_entry_ids": "Writable HomeKit target entries",
+          "matter_host": "Matterbridge host",
+          "matter_port": "Matterbridge port",
+          "google_include": "Always include in Google Home",
+          "google_exclude": "Exclude from Google Home",
+          "homekit_include": "Always include in HomeKit",
+          "homekit_exclude": "Exclude from HomeKit",
+          "matter_include": "Always include in Matterbridge",
+          "matter_exclude": "Exclude from Matterbridge"
+        },
+        "data_description": {
+          "google_config_path": "Relative YAML file loaded by Google Assistant entity_config. Google Home targets require this dedicated file and expose_by_default set to false.",
+          "homekit_managed_entry_ids": "Select the main Bridge and every independent Bridge or Accessory this integration may update.",
+          "matter_host": "Host name or IP address of the Matterbridge service.",
+          "matter_port": "Management API port of the Matterbridge service.",
+          "google_include": "Additional entities to synchronize to Google Home even when absent from the source.",
+          "google_exclude": "Entities that must not be synchronized to Google Home.",
+          "homekit_include": "Additional entities to synchronize to HomeKit even when absent from the source.",
+          "homekit_exclude": "Entities that must not be synchronized to HomeKit.",
+          "matter_include": "Additional entities to synchronize to Matterbridge even when absent from the source.",
+          "matter_exclude": "Entities that must not be synchronized to Matterbridge."
+        }
+      },
+      "confirm": {
+        "title": "Review settings",
+        "description": "Review the settings below. No source or target configuration is changed until you submit this final step.\n\n{summary}"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "required": "This field is required.",
+      "dashboard_not_found": "One or more selected dashboard views could not be read. Choose again or enter a path manually.",
+      "dashboard_required": "Select at least one dashboard view.",
+      "dashboard_selection_conflict": "Manual path entry cannot be selected together with dashboard views.",
+      "empty_source": "The selected source contains no entities. Choose a non-empty source to prevent unintended removals.",
+      "entity_required": "Select at least one entity.",
+      "entity_not_found": "One or more selected entities no longer exist.",
+      "target_required": "Select at least one target platform.",
+      "invalid_target": "One or more target platforms are invalid.",
+      "invalid_path": "Enter a relative YAML path inside the Home Assistant configuration directory.",
+      "homekit_entry_required": "Select at least one HomeKit Bridge or Accessory.",
+      "homekit_source_entry_required": "Select at least one HomeKit Bridge or Accessory as the source.",
+      "homekit_source_entry_not_found": "One or more selected HomeKit source entries no longer exist. Choose from the current integration entries.",
+      "homekit_source_entry_unavailable": "One or more selected HomeKit source entries are not loaded. Resolve the integration issue before continuing.",
+      "homekit_source_filter_unsupported": "One or more selected HomeKit source entries cannot be read as an exact entity set. Configure an explicit entity list before continuing.",
+      "invalid_port": "Enter a port between 1 and 65535.",
+      "include_exclude_conflict": "The same entity cannot be both added and excluded.",
+      "protected_rule_conflict": "This selection conflicts with a protected deployment rule.",
+      "google_setup_required": "Google Assistant is not ready for exact synchronization. Complete the integration, account link, dedicated device file, default exposure, and Request Sync setup.",
+      "homekit_setup_required": "HomeKit is not ready. Check the selected Bridge and Accessory entries and ensure they are loaded.",
+      "matter_setup_required": "Matterbridge is not ready. Check its connection and Home Assistant plugin.",
+      "platform_unavailable": "A selected source or target platform is not ready. Check its integration and try again."
+    },
+    "step": {
+      "init": {
+        "title": "Cross-Platform Device Sync settings",
+        "data": {
+          "enabled": "Enable synchronization",
+          "source_kind": "Synchronization source"
+        },
+        "data_description": {
+          "enabled": "Enable cross-platform synchronization."
+        }
+      },
+      "dashboard": {
+        "title": "Choose dashboard views",
+        "description": "Select one or more dashboard views whose devices should become the synchronization source.",
+        "data": {
+          "source_page": "Dashboard views"
+        },
+        "data_description": {
+          "source_page": "Multiple selections are supported. The list shows each readable dashboard and view name together with its path."
+        }
+      },
+      "dashboard_path": {
+        "title": "Enter a dashboard path",
+        "description": "Use this fallback when a dashboard page cannot be listed automatically.",
+        "data": {
+          "source_dashboard": "Dashboard URL path",
+          "source_view": "Page URL path"
+        },
+        "data_description": {
+          "source_dashboard": "For example: lovelace.",
+          "source_view": "For example: default-view."
+        }
+      },
+      "manual": {
+        "title": "Choose source entities",
+        "description": "Select one or more entities as the synchronization source.",
+        "data": {
+          "source_entities": "Entities"
+        },
+        "data_description": {
+          "source_entities": "At least one existing entity is required."
+        }
+      },
+      "homekit_source": {
+        "title": "Select HomeKit Bridges and Accessories to sync",
+        "description": "Directly check one or more Home Assistant HomeKit Bridges or Accessories to use as the read-only synchronization source. This list does not represent accessories paired natively in Apple Home.",
+        "data": {
+          "homekit_source_entry_ids": "HomeKit Bridges and Accessories"
+        },
+        "data_description": {
+          "homekit_source_entry_ids": "Check one or more items directly. The integration reads only the selected entries; this selection does not grant permission to update them."
+        }
+      },
+      "targets": {
+        "title": "Choose target platforms",
+        "description": "Select one or more platforms that should receive the source device set. Only selected targets show target-specific additions and exclusions; a source-only platform may still show required connection fields.",
+        "data": {
+          "target_platforms": "Target platforms"
+        },
+        "data_description": {
+          "target_platforms": "A platform not selected as a target is not validated or synchronized as a target. If it is the source, its required connection settings and monitoring still apply."
+        }
+      },
+      "platform_settings": {
+        "title": "Configure selected platforms",
+        "description": "Only settings required by the source and selected target platforms are shown.\n\n{prerequisites}",
+        "data": {
+          "google_config_path": "Google Assistant device configuration file",
+          "homekit_managed_entry_ids": "Writable HomeKit target entries",
+          "matter_host": "Matterbridge host",
+          "matter_port": "Matterbridge port",
+          "google_include": "Always include in Google Home",
+          "google_exclude": "Exclude from Google Home",
+          "homekit_include": "Always include in HomeKit",
+          "homekit_exclude": "Exclude from HomeKit",
+          "matter_include": "Always include in Matterbridge",
+          "matter_exclude": "Exclude from Matterbridge"
+        },
+        "data_description": {
+          "google_config_path": "Relative YAML file loaded by Google Assistant entity_config. Google Home targets require this dedicated file and expose_by_default set to false.",
+          "homekit_managed_entry_ids": "Select the main Bridge and every independent Bridge or Accessory this integration may update.",
+          "matter_host": "Host name or IP address of the Matterbridge service.",
+          "matter_port": "Management API port of the Matterbridge service.",
+          "google_include": "Additional entities to synchronize to Google Home even when absent from the source.",
+          "google_exclude": "Entities that must not be synchronized to Google Home.",
+          "homekit_include": "Additional entities to synchronize to HomeKit even when absent from the source.",
+          "homekit_exclude": "Entities that must not be synchronized to HomeKit.",
+          "matter_include": "Additional entities to synchronize to Matterbridge even when absent from the source.",
+          "matter_exclude": "Entities that must not be synchronized to Matterbridge."
+        }
+      },
+      "confirm": {
+        "title": "Review settings",
+        "description": "Review the settings below. No source or target configuration is changed until you submit this final step.\n\n{summary}"
+      }
+    }
+  },
+  "selector": {
+    "source_kind": {
+      "options": {
+        "dashboard": "Devices on selected Home Assistant dashboard views",
+        "manual": "Manually selected devices",
+        "google": "Devices in Google Home",
+        "homekit": "Devices in HomeKit",
+        "matter": "Devices in Matterbridge"
+      }
+    },
+    "target_platforms": {
+      "options": {
+        "google": "Google Home",
+        "homekit": "HomeKit",
+        "matter": "Matterbridge"
+      }
+    }
+  },
+  "services": {
+    "preview": {
+      "name": "Preview synchronization",
+      "description": "Calculate exact target changes without applying them. When synchronization is off, the service returns disabled without reading a source."
+    },
+    "sync_now": {
+      "name": "Synchronize now",
+      "description": "Apply exact target sets immediately only while synchronization is enabled."
+    }
+  }
+}

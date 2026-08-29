@@ -1,0 +1,278 @@
+{
+  "title": "裝置平台同步",
+  "config": {
+    "abort": {
+      "already_configured": "裝置平台同步已完成設定。"
+    },
+    "error": {
+      "required": "此欄位為必填。",
+      "dashboard_not_found": "無法讀取一個或多個選取的儀表板頁面，請重新選擇或手動輸入路徑。",
+      "dashboard_required": "請至少選擇一個儀表板頁面。",
+      "dashboard_selection_conflict": "手動輸入路徑不能與其他儀表板頁面同時選取。",
+      "empty_source": "選取的來源沒有任何實體。請選擇含有裝置的來源，以免意外移除平台裝置。",
+      "entity_required": "請至少選擇一個實體。",
+      "entity_not_found": "一個或多個選取的實體已不存在。",
+      "target_required": "請至少選擇一個目標平台。",
+      "invalid_target": "一個或多個目標平台無效。",
+      "invalid_path": "請輸入 Home Assistant 設定目錄內的相對 YAML 路徑。",
+      "homekit_entry_required": "請至少選擇一個 HomeKit Bridge 或 Accessory。",
+      "homekit_source_entry_required": "請至少選擇一個 HomeKit Bridge 或 Accessory 作為來源。",
+      "homekit_source_entry_not_found": "一個或多個選取的 HomeKit 來源整合項目已不存在，請從目前的整合項目重新選擇。",
+      "homekit_source_entry_unavailable": "一個或多個選取的 HomeKit 來源整合項目尚未載入，請先排除整合問題再繼續。",
+      "homekit_source_filter_unsupported": "一個或多個選取的 HomeKit 來源整合項目無法讀成精確的實體集合，請先設定明確的實體清單。",
+      "invalid_port": "請輸入 1 到 65535 之間的連接埠。",
+      "include_exclude_conflict": "同一個實體不能同時列入額外加入與排除。",
+      "protected_rule_conflict": "此選項與受保護的部署規則衝突。",
+      "google_setup_required": "Google Assistant 尚未符合精確同步條件。請完成整合、帳戶連結、專用裝置設定檔、預設公開設定與 Request Sync。",
+      "homekit_setup_required": "HomeKit 尚未就緒。請檢查選取的 Bridge／Accessory，並確認它們已載入。",
+      "matter_setup_required": "Matterbridge 尚未就緒。請檢查連線及其 Home Assistant 外掛。",
+      "platform_unavailable": "選取的來源或目標平台尚未就緒，請檢查相關整合後再試一次。"
+    },
+    "step": {
+      "user": {
+        "title": "選擇同步來源",
+        "data": {
+          "enabled": "啟用同步",
+          "source_kind": "同步來源"
+        },
+        "data_description": {
+          "enabled": "啟用跨平台同步功能。"
+        }
+      },
+      "dashboard": {
+        "title": "選擇儀表板頁面",
+        "description": "選擇一個或多個要作為同步來源的儀表板頁面。",
+        "data": {
+          "source_page": "儀表板頁面"
+        },
+        "data_description": {
+          "source_page": "可複選；清單會顯示可讀取的儀表板名稱、頁面名稱及路徑。"
+        }
+      },
+      "dashboard_path": {
+        "title": "輸入儀表板路徑",
+        "description": "無法自動列出儀表板頁面時，可改用此備援方式。",
+        "data": {
+          "source_dashboard": "儀表板網址路徑",
+          "source_view": "頁面網址路徑"
+        },
+        "data_description": {
+          "source_dashboard": "例如：lovelace。",
+          "source_view": "例如：default-view。"
+        }
+      },
+      "manual": {
+        "title": "選擇來源實體",
+        "description": "選擇一個或多個實體作為同步來源。",
+        "data": {
+          "source_entities": "實體"
+        },
+        "data_description": {
+          "source_entities": "至少需要選擇一個目前存在的實體。"
+        }
+      },
+      "homekit_source": {
+        "title": "選擇要同步的 HomeKit Bridge／Accessory",
+        "description": "直接勾選一個或多個 Home Assistant HomeKit Bridge／Accessory 作為唯讀同步來源。此清單不代表直接配對在 Apple 家庭中的原生配件。",
+        "data": {
+          "homekit_source_entry_ids": "HomeKit Bridge／Accessory"
+        },
+        "data_description": {
+          "homekit_source_entry_ids": "可直接複選；此外掛只讀取勾選項目，不會因來源選擇取得更新它們的權限。"
+        }
+      },
+      "targets": {
+        "title": "選擇目標平台",
+        "description": "選擇一個或多個要接收來源裝置的平台。只有已勾選的目標才會顯示額外加入與排除；僅作為來源的平台仍可能顯示必要連線欄位。",
+        "data": {
+          "target_platforms": "目標平台"
+        },
+        "data_description": {
+          "target_platforms": "未勾選為目標的平台不會作為目標驗證或同步；若它同時是來源，仍會顯示來源所需連線設定並監測變更。"
+        }
+      },
+      "platform_settings": {
+        "title": "設定已選平台",
+        "description": "只顯示同步來源及已勾選目標平台所需的設定。\n\n{prerequisites}",
+        "data": {
+          "google_config_path": "Google Assistant 裝置設定檔",
+          "homekit_managed_entry_ids": "可更新的 HomeKit 目標項目",
+          "matter_host": "Matterbridge 主機",
+          "matter_port": "Matterbridge 連接埠",
+          "google_include": "Google Home 額外加入",
+          "google_exclude": "Google Home 排除",
+          "homekit_include": "HomeKit 額外加入",
+          "homekit_exclude": "HomeKit 排除",
+          "matter_include": "Matterbridge 額外加入",
+          "matter_exclude": "Matterbridge 排除"
+        },
+        "data_description": {
+          "google_config_path": "由 Google Assistant entity_config 載入的相對 YAML 路徑。Google Home 作為目標時，必須使用此專用檔案並將 expose_by_default 設為 false。",
+          "homekit_managed_entry_ids": "選擇此外掛可更新的主 Bridge，以及每一個獨立 Bridge 或 Accessory。",
+          "matter_host": "Matterbridge 服務的主機名稱或 IP 位址。",
+          "matter_port": "Matterbridge 管理 API 的連接埠。",
+          "google_include": "即使不在來源中，也額外同步至 Google Home 的實體。",
+          "google_exclude": "不得同步至 Google Home 的實體。",
+          "homekit_include": "即使不在來源中，也額外同步至 HomeKit 的實體。",
+          "homekit_exclude": "不得同步至 HomeKit 的實體。",
+          "matter_include": "即使不在來源中，也額外同步至 Matterbridge 的實體。",
+          "matter_exclude": "不得同步至 Matterbridge 的實體。"
+        }
+      },
+      "confirm": {
+        "title": "確認設定",
+        "description": "請確認下列設定。送出最後一步以前，不會變更任何來源或目標平台。\n\n{summary}"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "required": "此欄位為必填。",
+      "dashboard_not_found": "無法讀取一個或多個選取的儀表板頁面，請重新選擇或手動輸入路徑。",
+      "dashboard_required": "請至少選擇一個儀表板頁面。",
+      "dashboard_selection_conflict": "手動輸入路徑不能與其他儀表板頁面同時選取。",
+      "empty_source": "選取的來源沒有任何實體。請選擇含有裝置的來源，以免意外移除平台裝置。",
+      "entity_required": "請至少選擇一個實體。",
+      "entity_not_found": "一個或多個選取的實體已不存在。",
+      "target_required": "請至少選擇一個目標平台。",
+      "invalid_target": "一個或多個目標平台無效。",
+      "invalid_path": "請輸入 Home Assistant 設定目錄內的相對 YAML 路徑。",
+      "homekit_entry_required": "請至少選擇一個 HomeKit Bridge 或 Accessory。",
+      "homekit_source_entry_required": "請至少選擇一個 HomeKit Bridge 或 Accessory 作為來源。",
+      "homekit_source_entry_not_found": "一個或多個選取的 HomeKit 來源整合項目已不存在，請從目前的整合項目重新選擇。",
+      "homekit_source_entry_unavailable": "一個或多個選取的 HomeKit 來源整合項目尚未載入，請先排除整合問題再繼續。",
+      "homekit_source_filter_unsupported": "一個或多個選取的 HomeKit 來源整合項目無法讀成精確的實體集合，請先設定明確的實體清單。",
+      "invalid_port": "請輸入 1 到 65535 之間的連接埠。",
+      "include_exclude_conflict": "同一個實體不能同時列入額外加入與排除。",
+      "protected_rule_conflict": "此選項與受保護的部署規則衝突。",
+      "google_setup_required": "Google Assistant 尚未符合精確同步條件。請完成整合、帳戶連結、專用裝置設定檔、預設公開設定與 Request Sync。",
+      "homekit_setup_required": "HomeKit 尚未就緒。請檢查選取的 Bridge／Accessory，並確認它們已載入。",
+      "matter_setup_required": "Matterbridge 尚未就緒。請檢查連線及其 Home Assistant 外掛。",
+      "platform_unavailable": "選取的來源或目標平台尚未就緒，請檢查相關整合後再試一次。"
+    },
+    "step": {
+      "init": {
+        "title": "裝置平台同步設定",
+        "data": {
+          "enabled": "啟用同步",
+          "source_kind": "同步來源"
+        },
+        "data_description": {
+          "enabled": "啟用跨平台同步功能。"
+        }
+      },
+      "dashboard": {
+        "title": "選擇儀表板頁面",
+        "description": "選擇一個或多個要作為同步來源的儀表板頁面。",
+        "data": {
+          "source_page": "儀表板頁面"
+        },
+        "data_description": {
+          "source_page": "可複選；清單會顯示可讀取的儀表板名稱、頁面名稱及路徑。"
+        }
+      },
+      "dashboard_path": {
+        "title": "輸入儀表板路徑",
+        "description": "無法自動列出儀表板頁面時，可改用此備援方式。",
+        "data": {
+          "source_dashboard": "儀表板網址路徑",
+          "source_view": "頁面網址路徑"
+        },
+        "data_description": {
+          "source_dashboard": "例如：lovelace。",
+          "source_view": "例如：default-view。"
+        }
+      },
+      "manual": {
+        "title": "選擇來源實體",
+        "description": "選擇一個或多個實體作為同步來源。",
+        "data": {
+          "source_entities": "實體"
+        },
+        "data_description": {
+          "source_entities": "至少需要選擇一個目前存在的實體。"
+        }
+      },
+      "homekit_source": {
+        "title": "選擇要同步的 HomeKit Bridge／Accessory",
+        "description": "直接勾選一個或多個 Home Assistant HomeKit Bridge／Accessory 作為唯讀同步來源。此清單不代表直接配對在 Apple 家庭中的原生配件。",
+        "data": {
+          "homekit_source_entry_ids": "HomeKit Bridge／Accessory"
+        },
+        "data_description": {
+          "homekit_source_entry_ids": "可直接複選；此外掛只讀取勾選項目，不會因來源選擇取得更新它們的權限。"
+        }
+      },
+      "targets": {
+        "title": "選擇目標平台",
+        "description": "選擇一個或多個要接收來源裝置的平台。只有已勾選的目標才會顯示額外加入與排除；僅作為來源的平台仍可能顯示必要連線欄位。",
+        "data": {
+          "target_platforms": "目標平台"
+        },
+        "data_description": {
+          "target_platforms": "未勾選為目標的平台不會作為目標驗證或同步；若它同時是來源，仍會顯示來源所需連線設定並監測變更。"
+        }
+      },
+      "platform_settings": {
+        "title": "設定已選平台",
+        "description": "只顯示同步來源及已勾選目標平台所需的設定。\n\n{prerequisites}",
+        "data": {
+          "google_config_path": "Google Assistant 裝置設定檔",
+          "homekit_managed_entry_ids": "可更新的 HomeKit 目標項目",
+          "matter_host": "Matterbridge 主機",
+          "matter_port": "Matterbridge 連接埠",
+          "google_include": "Google Home 額外加入",
+          "google_exclude": "Google Home 排除",
+          "homekit_include": "HomeKit 額外加入",
+          "homekit_exclude": "HomeKit 排除",
+          "matter_include": "Matterbridge 額外加入",
+          "matter_exclude": "Matterbridge 排除"
+        },
+        "data_description": {
+          "google_config_path": "由 Google Assistant entity_config 載入的相對 YAML 路徑。Google Home 作為目標時，必須使用此專用檔案並將 expose_by_default 設為 false。",
+          "homekit_managed_entry_ids": "選擇此外掛可更新的主 Bridge，以及每一個獨立 Bridge 或 Accessory。",
+          "matter_host": "Matterbridge 服務的主機名稱或 IP 位址。",
+          "matter_port": "Matterbridge 管理 API 的連接埠。",
+          "google_include": "即使不在來源中，也額外同步至 Google Home 的實體。",
+          "google_exclude": "不得同步至 Google Home 的實體。",
+          "homekit_include": "即使不在來源中，也額外同步至 HomeKit 的實體。",
+          "homekit_exclude": "不得同步至 HomeKit 的實體。",
+          "matter_include": "即使不在來源中，也額外同步至 Matterbridge 的實體。",
+          "matter_exclude": "不得同步至 Matterbridge 的實體。"
+        }
+      },
+      "confirm": {
+        "title": "確認設定",
+        "description": "請確認下列設定。送出最後一步以前，不會變更任何來源或目標平台。\n\n{summary}"
+      }
+    }
+  },
+  "selector": {
+    "source_kind": {
+      "options": {
+        "dashboard": "Home Assistant 儀表板中的裝置",
+        "manual": "手動選取的裝置",
+        "google": "Google Home 中的裝置",
+        "homekit": "HomeKit 中的裝置",
+        "matter": "Matterbridge 中的裝置"
+      }
+    },
+    "target_platforms": {
+      "options": {
+        "google": "Google Home",
+        "homekit": "HomeKit",
+        "matter": "Matterbridge"
+      }
+    }
+  },
+  "services": {
+    "preview": {
+      "name": "預覽同步",
+      "description": "計算各目標平台的精確變更，但不套用。停用同步時，不讀取來源並直接回傳已停用。"
+    },
+    "sync_now": {
+      "name": "立即同步",
+      "description": "只有啟用同步時，才立即套用各目標平台的精確實體集合。"
+    }
+  }
+}
