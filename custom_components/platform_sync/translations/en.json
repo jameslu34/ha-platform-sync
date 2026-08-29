@@ -83,7 +83,7 @@
       },
       "targets": {
         "title": "Choose target platforms",
-        "description": "Select one or more platforms that should receive the source device set. Only selected targets show target-specific additions and exclusions; a source-only platform may still show required connection fields.",
+        "description": "Select one or more platforms that should receive the source device set. Selected targets converge to an exact final set: existing exposures outside the source, always-include list, and protected rules are removed; exclusions stay absent. Only selected targets show target-specific settings.",
         "data": {
           "target_platforms": "Target platforms"
         },
@@ -121,7 +121,7 @@
       },
       "confirm": {
         "title": "Review settings",
-        "description": "Review the settings below. No source or target configuration is changed until you submit this final step.\n\n{summary}"
+        "description": "Review the settings below. No source or target configuration is changed until you submit this final step. Selected targets then converge to their exact final sets; unselected targets stay unchanged.\n\n{summary}"
       }
     }
   },
@@ -205,7 +205,7 @@
       },
       "targets": {
         "title": "Choose target platforms",
-        "description": "Select one or more platforms that should receive the source device set. Only selected targets show target-specific additions and exclusions; a source-only platform may still show required connection fields.",
+        "description": "Select one or more platforms that should receive the source device set. Selected targets converge to an exact final set: existing exposures outside the source, always-include list, and protected rules are removed; exclusions stay absent. Only selected targets show target-specific settings.",
         "data": {
           "target_platforms": "Target platforms"
         },
@@ -243,7 +243,7 @@
       },
       "confirm": {
         "title": "Review settings",
-        "description": "Review the settings below. No source or target configuration is changed until you submit this final step.\n\n{summary}"
+        "description": "Review the settings below. No source or target configuration is changed until you submit this final step. Selected targets then converge to their exact final sets; unselected targets stay unchanged.\n\n{summary}"
       }
     }
   },
