@@ -21,6 +21,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
   fallback polling where needed.
 - Startup reconciliation, two-second change coalescing, no-op detection,
   transactional backup, rollback, and exact readback.
+- Exact selected-target convergence removes pre-existing extra exposures while
+  preserving per-platform additions, exclusions, and protected rules.
 - Preview and synchronize-now actions without creating extra entities.
 - HACS-compatible repository structure, public documentation, and automated
   validation.
