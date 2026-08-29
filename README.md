@@ -135,6 +135,17 @@ When the calculated sets are unchanged, the run is a no-op. When a change is
 needed, targets are backed up and applied in Google Home → HomeKit →
 Matterbridge order. A failure starts reverse-order rollback and exact readback.
 
+Enabled background checks also validate Matterbridge's bridge, plugin, exact
+allowlist, filters, and loaded devices. If the management API is reachable and
+the saved credentials and exact non-empty allowlist are still intact, a
+runtime-only failure can recover automatically. The integration waits for the
+backup archive to finish, restarts `matterbridge-hass` first, and restarts the
+full Matterbridge process only if exact readback still does not converge. It
+attempts this guarded recovery once per failure episode with a five-minute
+cooldown. Persistent failures retry after 15, 30, 60, 120, then 300 seconds.
+Unreachable APIs, missing credentials, disabled plugins, malformed or changed
+allowlists, and competing filters never authorize an automatic restart.
+
 ## Platform notes and limitations
 
 - **Google Home:** the source and target are the Home Assistant Google Assistant

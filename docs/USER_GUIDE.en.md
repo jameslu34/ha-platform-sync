@@ -1,6 +1,6 @@
 # Cross-Platform Device Sync: Complete User Guide
 
-> Applies to version: 0.6.1
+> Applies to version: 0.6.2
 > English name: Cross-Platform Device Sync
 > Traditional Chinese name: 裝置平台同步
 
@@ -455,6 +455,22 @@ notifications, the integration checks periodically instead.
 
 The integration checks the device list about every 15 seconds. Synchronization
 starts only when it detects a change.
+
+### Automatic Matterbridge recovery
+
+While synchronization is enabled, background checks also verify that
+Matterbridge, `matterbridge-hass`, the exact device list, and the loaded devices
+are ready. For a narrowly defined runtime-only failure, the integration waits
+until a Matterbridge backup has actually finished, restarts the Home Assistant
+plugin first, and restarts the full Matterbridge process only when exact
+readback still fails. It performs this recovery at most once per failure
+episode and keeps a five-minute cooldown. Continued failures retry after 15,
+30, 60, 120, then 300 seconds.
+
+The integration does not restart Matterbridge when the management interface is
+unreachable, credentials are missing, the plugin is disabled, the exact list
+is empty or different, or another filter is active. Disabling synchronization
+also disables this automatic recovery.
 
 ### With a manual source
 

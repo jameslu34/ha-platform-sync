@@ -54,6 +54,7 @@ def install_stubs() -> None:
     config_validation = ModuleType("homeassistant.helpers.config_validation")
     dispatcher = ModuleType("homeassistant.helpers.dispatcher")
     event = ModuleType("homeassistant.helpers.event")
+    device_registry = ModuleType("homeassistant.helpers.device_registry")
     entity_registry = ModuleType("homeassistant.helpers.entity_registry")
     components = ModuleType("homeassistant.components")
     lovelace = ModuleType("homeassistant.components.lovelace")
@@ -98,6 +99,9 @@ def install_stubs() -> None:
     dispatcher.async_dispatcher_connect = lambda *_args, **_kwargs: lambda: None
     event.async_track_time_interval = lambda *_args, **_kwargs: lambda: None
     entity_registry.EVENT_ENTITY_REGISTRY_UPDATED = "entity_registry_updated"
+    device_registry.async_get = lambda _hass: SimpleNamespace(devices={})
+    entity_registry.async_get = lambda _hass: SimpleNamespace(entities={})
+    helpers.device_registry = device_registry
     helpers.entity_registry = entity_registry
     helpers.config_validation = config_validation
     helpers.dispatcher = dispatcher
@@ -117,6 +121,7 @@ def install_stubs() -> None:
             "homeassistant.helpers.config_validation": config_validation,
             "homeassistant.helpers.dispatcher": dispatcher,
             "homeassistant.helpers.event": event,
+            "homeassistant.helpers.device_registry": device_registry,
             "homeassistant.helpers.entity_registry": entity_registry,
             "homeassistant.components": components,
             "homeassistant.components.lovelace": lovelace,
@@ -135,6 +140,9 @@ runtime_config_module = load(
 )
 
 targets = load("custom_components.platform_sync.targets", "targets.py")
+sources_module = load(
+    "custom_components.platform_sync.sources_actual", "sources.py"
+)
 
 sources_stub = ModuleType("custom_components.platform_sync.sources")
 sources_stub.async_read_source = None
@@ -765,6 +773,7 @@ async def check_matter_validation_contract() -> int:
         "error": False,
         "registeredDevices": 1,
         "configJson": {
+            "token": "configured-test-token",
             "whiteList": ["light.one"],
             "filterByArea": "",
             "filterByLabel": "",
@@ -823,6 +832,505 @@ async def check_matter_validation_contract() -> int:
         "Matter validation reports plugin lifecycle and exact device counts",
     )
     return 2
+
+
+def matter_snapshot(
+    *,
+    plugin_updates: dict[str, Any] | None = None,
+    config_updates: dict[str, Any] | None = None,
+    settings_updates: dict[str, Any] | None = None,
+    devices: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Build one exact, credential-redacted Matterbridge test snapshot."""
+    plugin_config = {
+        "token": "configured",
+        "whiteList": ["light.one"],
+        "filterByArea": "",
+        "filterByLabel": "",
+        "virtualControlLabel": "",
+        "blackList": [],
+        "entityWhiteList": [],
+        "entityBlackList": [],
+        "deviceEntityBlackList": {},
+        "splitEntities": [],
+        "splitByLabel": "",
+    }
+    plugin_config.update(config_updates or {})
+    plugin = {
+        "name": targets.MATTER_PLUGIN,
+        "enabled": True,
+        "loaded": True,
+        "started": True,
+        "error": False,
+        "restartRequired": False,
+        "registeredDevices": 1,
+        "configJson": plugin_config,
+    }
+    plugin.update(plugin_updates or {})
+    information = {
+        "bridgeStatus": "Started",
+        "restartRequired": False,
+        "fixedRestartRequired": False,
+    }
+    information.update(settings_updates or {})
+    loaded_devices = devices
+    if loaded_devices is None:
+        loaded_devices = [
+            {
+                "pluginName": targets.MATTER_PLUGIN,
+                "endpoint": 1,
+                "uniqueId": "device-one",
+                "serial": "serial-one",
+            }
+        ]
+    return targets.MatterRuntimeSnapshot(
+        settings={"matterbridgeInformation": information},
+        plugin=plugin,
+        plugin_config=plugin_config,
+        devices=loaded_devices,
+        allowlist=frozenset({"light.one"}),
+    )
+
+
+def check_matter_recovery_guard() -> int:
+    """Only exact, credentialed runtime failures permit a process restart."""
+    expected = frozenset({"light.one"})
+    recoverable = (
+        matter_snapshot(plugin_updates={"error": True}),
+        matter_snapshot(plugin_updates={"started": False}),
+        matter_snapshot(plugin_updates={"restartRequired": True}),
+        matter_snapshot(
+            plugin_updates={"registeredDevices": 0},
+            devices=[],
+        ),
+    )
+    for snapshot in recoverable:
+        check(
+            targets._matter_recovery_eligible(snapshot, expected),
+            "A narrowly recoverable Matterbridge runtime state is accepted",
+        )
+
+    blocked = (
+        matter_snapshot(plugin_updates={"enabled": False, "error": True}),
+        matter_snapshot(plugin_updates={"name": "other-plugin", "error": True}),
+        matter_snapshot(
+            plugin_updates={"error": True}, config_updates={"token": ""}
+        ),
+        matter_snapshot(
+            plugin_updates={"error": True},
+            config_updates={"filterByLabel": "unsafe-filter"},
+        ),
+        matter_snapshot(
+            plugin_updates={"error": True},
+            config_updates={"whiteList": ["light.other"]},
+        ),
+        matter_snapshot(
+            plugin_updates={"error": True},
+            settings_updates={"bridgeStatus": "Stopped"},
+        ),
+    )
+    for snapshot in blocked:
+        check(
+            not targets._matter_recovery_eligible(snapshot, expected),
+            "Unsafe Matterbridge states never authorize a process restart",
+        )
+    check(
+        "configured" not in repr(recoverable[0]),
+        "Matterbridge runtime snapshots never render credential material",
+    )
+    return 11
+
+
+async def check_matter_apply_process_fallback() -> int:
+    """A stuck plugin restart falls back to one full process restart."""
+    expected = frozenset({"light.one"})
+    calls: list[str] = []
+    waits = 0
+
+    async def request(_config: Any, command: str, payload: Any = None) -> Any:
+        calls.append(command)
+        if command == "plugins":
+            return [matter_snapshot().plugin]
+        if command in {"savepluginconfig", "restartplugin"}:
+            return {}
+        raise AssertionError(f"Unexpected Matterbridge command: {command}")
+
+    async def read_snapshot(_config: Any) -> Any:
+        calls.append("snapshot")
+        return matter_snapshot(plugin_updates={"error": True})
+
+    async def fire(_config: Any, command: str, payload: Any = None) -> None:
+        check(command == "restart", "Fallback restarts the Matterbridge process")
+        calls.append("restart")
+
+    async def wait(_config: Any, desired: frozenset[str], timeout: float = 60) -> Any:
+        nonlocal waits
+        check(desired == expected, "Both waits retain the exact expected allowlist")
+        waits += 1
+        calls.append(f"wait-{waits}")
+        if waits == 1:
+            raise RuntimeError("safe test timeout")
+        return {"loaded": True}
+
+    def authorize() -> bool:
+        calls.append("authorized")
+        return True
+
+    originals = (
+        targets._matter_request,
+        targets._read_matter_runtime_snapshot,
+        targets._matter_fire_and_forget,
+        targets._wait_matter_runtime,
+    )
+    targets._matter_request = request
+    targets._read_matter_runtime_snapshot = read_snapshot
+    targets._matter_fire_and_forget = fire
+    targets._wait_matter_runtime = wait
+    try:
+        process_restarted = await targets._apply_matter(
+            SimpleNamespace(),
+            expected,
+            before_matter_process_restart=authorize,
+        )
+        fallback_calls = list(calls)
+        calls.clear()
+        waits = 0
+        try:
+            await targets._apply_matter(
+                SimpleNamespace(),
+                expected,
+                before_matter_process_restart=lambda: False,
+            )
+        except RuntimeError as error:
+            check(
+                "blocked by the recovery guard" in str(error),
+                "A denied process restart fails closed",
+            )
+        else:
+            raise AssertionError("A denied process restart must not be sent")
+        denied_calls = list(calls)
+    finally:
+        (
+            targets._matter_request,
+            targets._read_matter_runtime_snapshot,
+            targets._matter_fire_and_forget,
+            targets._wait_matter_runtime,
+        ) = originals
+    check(
+        fallback_calls
+        == [
+            "plugins",
+            "savepluginconfig",
+            "restartplugin",
+            "wait-1",
+            "snapshot",
+            "authorized",
+            "restart",
+            "wait-2",
+        ],
+        "Plugin restart precedes exactly one guarded process fallback and readback",
+    )
+    check(process_restarted is True, "Apply reports its full process fallback")
+    check(
+        denied_calls
+        == [
+            "plugins",
+            "savepluginconfig",
+            "restartplugin",
+            "wait-1",
+            "snapshot",
+        ],
+        "An unauthorized fallback sends no Matterbridge process restart",
+    )
+    return 6
+
+
+async def check_matter_restart_cancellation_marker() -> int:
+    """Cancellation after a restart send cannot erase the shared attempt marker."""
+    expected = frozenset({"light.one"})
+    config = SimpleNamespace(
+        enabled=True,
+        matter_host="matterbridge.cancel.test",
+        matter_port=8283,
+    )
+    hass = SimpleNamespace(data={})
+    manager = manager_module.PlatformSyncManager(hass, config)
+    runtime_waiting = asyncio.Event()
+    waits = 0
+    restart_calls = 0
+
+    async def request(_config: Any, command: str, payload: Any = None) -> Any:
+        if command == "plugins":
+            return [matter_snapshot().plugin]
+        if command in {"savepluginconfig", "restartplugin"}:
+            return {}
+        raise AssertionError(f"Unexpected Matterbridge command: {command}")
+
+    async def read_snapshot(_config: Any) -> Any:
+        return matter_snapshot(plugin_updates={"error": True})
+
+    async def fire(_config: Any, command: str, payload: Any = None) -> None:
+        nonlocal restart_calls
+        guard = manager._matter_recovery_guard
+        check(
+            command == "restart"
+            and guard.attempted_for_episode
+            and guard.process_restart_attempted
+            and guard.last_attempt is not None,
+            "The shared attempt marker exists before the restart command is sent",
+        )
+        restart_calls += 1
+
+    async def wait(_config: Any, desired: frozenset[str], timeout: float = 60) -> Any:
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            raise RuntimeError("safe simulated plugin restart timeout")
+        runtime_waiting.set()
+        await asyncio.Event().wait()
+
+    originals = (
+        targets._matter_request,
+        targets._read_matter_runtime_snapshot,
+        targets._matter_fire_and_forget,
+        targets._wait_matter_runtime,
+    )
+    targets._matter_request = request
+    targets._read_matter_runtime_snapshot = read_snapshot
+    targets._matter_fire_and_forget = fire
+    targets._wait_matter_runtime = wait
+    task = asyncio.create_task(
+        targets._apply_matter(
+            config,
+            expected,
+            before_matter_process_restart=manager._before_matter_process_restart,
+        )
+    )
+    cancelled = False
+    try:
+        await asyncio.wait_for(runtime_waiting.wait(), timeout=0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            cancelled = True
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        (
+            targets._matter_request,
+            targets._read_matter_runtime_snapshot,
+            targets._matter_fire_and_forget,
+            targets._wait_matter_runtime,
+        ) = originals
+
+    check(cancelled, "Cancellation during process runtime readback propagates")
+    reloaded = manager_module.PlatformSyncManager(hass, config)
+    check(
+        reloaded._matter_recovery_guard is manager._matter_recovery_guard
+        and reloaded._matter_recovery_guard.attempted_for_episode,
+        "The cancellation marker survives Config Entry manager replacement",
+    )
+    check(
+        not reloaded._before_matter_process_restart(),
+        "A replacement manager cannot send another restart in the same episode",
+    )
+    check(restart_calls == 1, "Cancellation leaves exactly one restart command sent")
+    return 5
+
+
+async def check_guarded_matter_runtime_recovery() -> int:
+    """Automatic recovery uses plugin restart before one process fallback."""
+    expected = frozenset({"light.one"})
+    calls: list[str] = []
+    snapshots = 0
+    waits = 0
+
+    async def read_snapshot(_config: Any) -> Any:
+        nonlocal snapshots
+        snapshots += 1
+        calls.append("snapshot")
+        return matter_snapshot(plugin_updates={"error": True})
+
+    async def backup(_config: Any) -> None:
+        calls.append("backup-ready")
+
+    async def request(_config: Any, command: str, payload: Any = None) -> Any:
+        check(
+            command == "restartplugin"
+            and payload == {"pluginName": targets.MATTER_PLUGIN},
+            "Recovery first restarts only the Home Assistant plugin",
+        )
+        calls.append("restartplugin")
+        return {}
+
+    async def fire(_config: Any, command: str, payload: Any = None) -> None:
+        check(command == "restart", "Recovery restarts the full Matterbridge process")
+        calls.append(command)
+
+    async def wait(_config: Any, entities: frozenset[str], timeout: float = 60) -> Any:
+        nonlocal waits
+        waits += 1
+        check(entities == expected, "Recovery waits for the exact expected runtime")
+        calls.append(f"wait-{waits}")
+        if waits == 1:
+            raise RuntimeError("safe simulated plugin restart timeout")
+        return {"loaded": True}
+
+    originals = (
+        targets._read_matter_runtime_snapshot,
+        targets._matter_create_backup_ready,
+        targets._matter_request,
+        targets._matter_fire_and_forget,
+        targets._wait_matter_runtime,
+    )
+    targets._read_matter_runtime_snapshot = read_snapshot
+    targets._matter_create_backup_ready = backup
+    targets._matter_request = request
+    targets._matter_fire_and_forget = fire
+    targets._wait_matter_runtime = wait
+    try:
+        runtime = await targets.async_recover_matter_runtime(
+            SimpleNamespace(),
+            expected,
+            before_matter_process_restart=lambda: calls.append("authorized")
+            is None,
+        )
+        fallback_calls = list(calls)
+        fallback_snapshot_count = snapshots
+        calls.clear()
+        plugin_only_runtime = await targets.async_recover_matter_runtime(
+            SimpleNamespace(),
+            expected,
+            before_matter_process_restart=lambda: calls.append("unexpected-authorize")
+            is None,
+        )
+        plugin_only_calls = list(calls)
+        calls.clear()
+
+        async def backup_unverified(_config: Any) -> None:
+            calls.append("backup-unverified")
+            raise RuntimeError("safe simulated backup completion timeout")
+
+        targets._matter_create_backup_ready = backup_unverified
+        try:
+            await targets.async_recover_matter_runtime(
+                SimpleNamespace(),
+                expected,
+                before_matter_process_restart=lambda: calls.append(
+                    "unexpected-authorize"
+                )
+                is None,
+            )
+        except RuntimeError:
+            backup_failure_calls = list(calls)
+        else:
+            raise AssertionError("An unverified backup must block every restart")
+    finally:
+        (
+            targets._read_matter_runtime_snapshot,
+            targets._matter_create_backup_ready,
+            targets._matter_request,
+            targets._matter_fire_and_forget,
+            targets._wait_matter_runtime,
+        ) = originals
+    check(runtime == {"loaded": True}, "Recovery returns verified runtime state")
+    check(
+        fallback_calls
+        == [
+            "snapshot",
+            "backup-ready",
+            "restartplugin",
+            "wait-1",
+            "snapshot",
+            "authorized",
+            "restart",
+            "wait-2",
+        ]
+        and fallback_snapshot_count == 2,
+        "Completed backup and plugin retry strictly precede one guarded process fallback",
+    )
+    check(
+        plugin_only_runtime == {"loaded": True}
+        and plugin_only_calls
+        == ["snapshot", "backup-ready", "restartplugin", "wait-3"],
+        "A successful plugin restart prevents a full Matterbridge process restart",
+    )
+    check(
+        backup_failure_calls == ["snapshot", "backup-unverified"],
+        "An unverified backup blocks both plugin and process restart commands",
+    )
+    return 7
+
+
+async def check_matter_source_runtime_validation() -> int:
+    """Matterbridge used only as a source still requires a healthy runtime."""
+    calls: list[tuple[str, frozenset[str]]] = []
+    expected = frozenset({"light.one"})
+
+    async def read_platform_source(_hass: Any, _config: Any, _platform: Any) -> Any:
+        return expected
+
+    async def validate_target(
+        _hass: Any, _config: Any, platform: Any, entities: frozenset[str]
+    ) -> Any:
+        calls.append((platform.value, entities))
+        return {"loaded": True}
+
+    originals = (
+        targets.async_read_platform_source,
+        targets.async_validate_target,
+    )
+    targets.async_read_platform_source = read_platform_source
+    targets.async_validate_target = validate_target
+    try:
+        source = await sources_module.async_read_source(
+            SimpleNamespace(),
+            SimpleNamespace(source_kind=const.SourceKind.MATTER),
+        )
+    finally:
+        (
+            targets.async_read_platform_source,
+            targets.async_validate_target,
+        ) = originals
+    check(source.entities == expected, "Matter source retains its exact allowlist")
+    check(
+        calls == [(const.TargetPlatform.MATTER.value, expected)],
+        "Matter source performs full runtime validation",
+    )
+
+    async def reject_runtime(
+        _hass: Any, _config: Any, _platform: Any, entities: frozenset[str]
+    ) -> Any:
+        raise targets.MatterbridgeRuntimeError(
+            "devices_zero", entities, recoverable=True
+        )
+
+    targets.async_read_platform_source = read_platform_source
+    targets.async_validate_target = reject_runtime
+    try:
+        try:
+            await sources_module.async_read_source(
+                SimpleNamespace(),
+                SimpleNamespace(source_kind=const.SourceKind.MATTER),
+            )
+        except targets.MatterbridgeRuntimeError as error:
+            check(
+                error.reason == "devices_zero",
+                "Matter source propagates a safe runtime reason code",
+            )
+        else:
+            raise AssertionError("An unhealthy Matter source must fail closed")
+    finally:
+        (
+            targets.async_read_platform_source,
+            targets.async_validate_target,
+        ) = originals
+    return 3
 
 
 async def check_matter_request_overall_timeout() -> int:
@@ -895,6 +1403,168 @@ async def check_matter_request_overall_timeout() -> int:
     return 3
 
 
+async def check_matter_backup_completion_handshake() -> int:
+    """Backup readiness requires its request ack and matching archive event."""
+    orders = [
+        ["ack", "archive"],
+        ["archive", "ack"],
+    ]
+    sent: list[dict[str, Any]] = []
+    send_started = asyncio.Event()
+
+    class FakeWebSocket:
+        def __init__(self, order: list[str]) -> None:
+            self.order = order
+            self.request_id = 0
+
+        async def send_json(self, request: dict[str, Any]) -> None:
+            sent.append(request)
+            self.request_id = request["id"]
+            send_started.set()
+
+        async def receive(self) -> Any:
+            kind = self.order.pop(0)
+            if kind == "block":
+                await asyncio.Event().wait()
+                raise AssertionError("Cancellation must interrupt backup readiness")
+            if kind == "ack":
+                payload = {
+                    "id": self.request_id,
+                    "method": "/api/create-backup",
+                    "success": True,
+                    "response": None,
+                }
+            else:
+                payload = {
+                    "id": 0,
+                    "method": "archive",
+                    "success": True,
+                    "response": {
+                        "command": "zip",
+                        "archivePath": "/tmp/matterbridge.backup.zip",
+                    },
+                }
+            return SimpleNamespace(type="text", data=json.dumps(payload))
+
+    class AsyncContext:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        async def __aenter__(self) -> Any:
+            return self.value
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class FakeClientSession:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def ws_connect(self, _url: str, *, heartbeat: int) -> AsyncContext:
+            check(heartbeat == 20, "Backup completion websocket retains its heartbeat")
+            return AsyncContext(FakeWebSocket(orders.pop(0)))
+
+    fake_aiohttp = ModuleType("aiohttp")
+    fake_aiohttp.ClientSession = FakeClientSession
+    fake_aiohttp.WSMsgType = SimpleNamespace(TEXT="text")
+    previous_aiohttp = sys.modules.get("aiohttp")
+    sys.modules["aiohttp"] = fake_aiohttp
+    try:
+        config = SimpleNamespace(matter_host="127.0.0.1", matter_port=8283)
+        await targets._matter_create_backup_ready(config)
+        await targets._matter_create_backup_ready(config)
+        orders.append(["block"])
+        send_started.clear()
+        cancelled_backup = asyncio.create_task(
+            targets._matter_create_backup_ready(config)
+        )
+        await asyncio.wait_for(send_started.wait(), timeout=0.1)
+        cancelled_backup.cancel()
+        try:
+            await asyncio.wait_for(cancelled_backup, timeout=0.1)
+        except asyncio.CancelledError:
+            check(True, "HA unload cancellation interrupts backup readiness promptly")
+        else:
+            raise AssertionError("Backup readiness must never swallow cancellation")
+    finally:
+        if previous_aiohttp is None:
+            sys.modules.pop("aiohttp", None)
+        else:
+            sys.modules["aiohttp"] = previous_aiohttp
+    check(
+        len(sent) == 3
+        and all(request["method"] == "/api/create-backup" for request in sent),
+        "Backup readiness sends one create request per attempted handshake",
+    )
+    check(
+        not orders,
+        "Backup readiness accepts ack and archive completion in either order",
+    )
+    check(
+        cancelled_backup.cancelled(),
+        "The bounded backup timeout does not delay a cancelled HA unload",
+    )
+    return 6
+
+
+async def check_matter_restart_is_fire_and_forget() -> int:
+    """A process restart send never waits for a response from the exiting server."""
+    sent: list[dict[str, Any]] = []
+
+    class FakeWebSocket:
+        async def send_json(self, request: dict[str, Any]) -> None:
+            sent.append(request)
+
+        async def receive(self) -> Any:
+            raise AssertionError("A process restart must not wait for a response")
+
+    class AsyncContext:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        async def __aenter__(self) -> Any:
+            return self.value
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class FakeClientSession:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def ws_connect(self, _url: str, *, heartbeat: int) -> AsyncContext:
+            check(heartbeat == 20, "Process restart retains websocket heartbeat")
+            return AsyncContext(FakeWebSocket())
+
+    fake_aiohttp = ModuleType("aiohttp")
+    fake_aiohttp.ClientSession = FakeClientSession
+    previous_aiohttp = sys.modules.get("aiohttp")
+    sys.modules["aiohttp"] = fake_aiohttp
+    try:
+        await targets._matter_fire_and_forget(
+            SimpleNamespace(matter_host="127.0.0.1", matter_port=8283),
+            "restart",
+            {},
+        )
+    finally:
+        if previous_aiohttp is None:
+            sys.modules.pop("aiohttp", None)
+        else:
+            sys.modules["aiohttp"] = previous_aiohttp
+    check(len(sent) == 1, "Process restart sends exactly one websocket command")
+    check(
+        sent[0]["method"] == "/api/restart" and sent[0]["params"] == {},
+        "Process restart uses only the fire-and-forget restart endpoint",
+    )
+    return 3
+
+
 def check_google_room_schema() -> int:
     """Google room metadata must use HA's supported ``room`` option."""
     current = {
@@ -933,9 +1603,9 @@ def check_google_room_schema() -> int:
 
 
 async def check_single_switch_runtime() -> int:
-    """Version 0.6.1 has one enable switch and no sensor/button platforms."""
+    """Version 0.6.2 has one enable switch and no sensor/button platforms."""
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
-    check(manifest["version"] == "0.6.1", "Manifest version is 0.6.1")
+    check(manifest["version"] == "0.6.2", "Manifest version is 0.6.2")
     check(const.DEFAULT_ENABLED is False, "New installations default disabled")
     check(const.PLATFORMS == (), "Version 0.4 exposes no sensor/button platforms")
     check(
@@ -1669,8 +2339,30 @@ def check_internal_timing_config() -> int:
     )
     check(
         const.INTERNAL_POLL_SECONDS == 15
-        and const.INTERNAL_RETRY_SECONDS == 15,
-        "Platform fallback polling and readiness retry are fixed at 15 seconds",
+        and const.INTERNAL_RETRY_SECONDS == 15
+        and const.INTERNAL_RETRY_MAX_SECONDS == 300
+        and const.INTERNAL_RETRY_DELAYS_SECONDS == (15, 30, 60, 120, 300),
+        "Polling stays at 15 seconds with the exact bounded fault retry schedule",
+    )
+    minimum_rollback_budget = (
+        targets.GOOGLE_SYNC_TIMEOUT
+        + targets.HOMEKIT_RELOAD_TIMEOUT
+        + targets.MATTER_RUNTIME_TIMEOUT
+        + 5 * targets.MATTER_REQUEST_TIMEOUT
+        + manager_module.ROLLBACK_SAFETY_MARGIN_SECONDS
+    )
+    check(
+        manager_module.ROLLBACK_TIMEOUT_SECONDS >= minimum_rollback_budget,
+        "Rollback covers all targets after cancellation during a Matter process fallback",
+    )
+    check(
+        manager_module.STOP_DRAIN_TIMEOUT_SECONDS
+        >= max(
+            manager_module.ROLLBACK_TIMEOUT_SECONDS,
+            targets.MATTER_BACKUP_TIMEOUT,
+        )
+        + manager_module.STOP_DRAIN_SAFETY_MARGIN_SECONDS,
+        "HA unload covers backup completion or rollback with an explicit safety margin",
     )
     config = runtime_config_module.SyncConfig.from_entry(
         {
@@ -1687,7 +2379,7 @@ def check_internal_timing_config() -> int:
         and not hasattr(config, "poll_seconds"),
         "Runtime config does not expose or consume legacy timing fields",
     )
-    return 3
+    return 5
 
 
 async def check_source_watcher_policy() -> int:
@@ -2298,6 +2990,341 @@ async def check_background_readiness_retry() -> int:
     return 3
 
 
+async def check_retry_backoff_resets_after_success() -> int:
+    """One successful reconciliation resets the next failure to 15 seconds."""
+    manager = manager_module.PlatformSyncManager(
+        SimpleNamespace(), SimpleNamespace(enabled=True)
+    )
+    calls = 0
+    sleeps: list[int] = []
+
+    async def reconcile(
+        reason: str, apply: bool, *, _background: bool = False
+    ) -> dict[str, Any]:
+        nonlocal calls
+        del reason, apply, _background
+        calls += 1
+        if calls == 2:
+            manager._pending_reason = "fresh_source_change"
+        return {
+            "status": "error" if calls in {1, 3} else "synced",
+            "changed": False,
+        }
+
+    async def sleep(delay: int) -> None:
+        sleeps.append(delay)
+
+    manager.async_reconcile = reconcile
+    original_sleep = manager_module.asyncio.sleep
+    manager_module.asyncio.sleep = sleep
+    try:
+        await manager._delayed_reconcile("startup_scan")
+    finally:
+        manager_module.asyncio.sleep = original_sleep
+    check(
+        sleeps == [2, 15, 2, 15],
+        "A successful run resets both debounce and fault backoff",
+    )
+    check(calls == 4, "Reset backoff still converges and exits normally")
+    return 2
+
+
+def check_source_events_preserve_fault_backoff() -> int:
+    """A 15-second source poll cannot collapse a longer fault backoff."""
+
+    class BackoffTask:
+        cancelled = False
+
+        def done(self) -> bool:
+            return False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    class NoNewTaskHass:
+        def async_create_task(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("A source event must not replace the backoff task")
+
+    manager = manager_module.PlatformSyncManager(
+        NoNewTaskHass(), SimpleNamespace(enabled=True)
+    )
+    task = BackoffTask()
+    manager._debounce_task = task
+    manager._retry_backoff_active = True
+    manager.schedule("source_poll")
+    check(not task.cancelled, "Source polling preserves the active fault backoff")
+    check(
+        manager._pending_reason == "source_poll",
+        "The newest source event is queued behind the fault backoff",
+    )
+    return 2
+
+
+async def check_matter_recovery_episode_and_cooldown() -> int:
+    """Background recovery is once per episode and never more often than five minutes."""
+    expected = frozenset({"light.one"})
+    recoverable = targets.MatterbridgeRuntimeError(
+        "plugin_error", expected, recoverable=True
+    )
+    manager = manager_module.PlatformSyncManager(
+        SimpleNamespace(), SimpleNamespace(enabled=True)
+    )
+    calls: list[frozenset[str]] = []
+
+    async def recover(
+        _config: Any,
+        entities: frozenset[str],
+        *,
+        before_matter_process_restart: Any,
+    ) -> dict[str, Any]:
+        calls.append(entities)
+        check(
+            before_matter_process_restart(),
+            "Background recovery authorizes its full restart before send",
+        )
+        return {"loaded": True}
+
+    original_recover = manager_module.async_recover_matter_runtime
+    manager_module.async_recover_matter_runtime = recover
+    try:
+        first = await manager._async_attempt_matter_recovery(
+            recoverable, background=True
+        )
+        second = await manager._async_attempt_matter_recovery(
+            recoverable, background=True
+        )
+        manager._matter_recovery_guard.last_attempt -= (
+            manager_module.MATTER_RECOVERY_COOLDOWN_SECONDS + 1
+        )
+        third = await manager._async_attempt_matter_recovery(
+            recoverable, background=True
+        )
+        disabled = manager_module.PlatformSyncManager(
+            SimpleNamespace(), SimpleNamespace(enabled=False)
+        )
+        stopping = manager_module.PlatformSyncManager(
+            SimpleNamespace(), SimpleNamespace(enabled=True)
+        )
+        stopping._stopping = True
+        direct = manager_module.PlatformSyncManager(
+            SimpleNamespace(), SimpleNamespace(enabled=True)
+        )
+        blocked_by_lifecycle = (
+            await disabled._async_attempt_matter_recovery(
+                recoverable, background=True
+            ),
+            await stopping._async_attempt_matter_recovery(
+                recoverable, background=True
+            ),
+            await direct._async_attempt_matter_recovery(
+                recoverable, background=False
+            ),
+        )
+    finally:
+        manager_module.async_recover_matter_runtime = original_recover
+    check(
+        first == {"loaded": True} and second is None and third == {"loaded": True},
+        "A recovered episode resets, while the five-minute cooldown remains enforced",
+    )
+    check(
+        calls == [expected, expected],
+        "Cooldown prevents repeated full Matterbridge process restarts",
+    )
+    check(
+        blocked_by_lifecycle == (None, None, None),
+        "Automatic process recovery runs only in an enabled background lifecycle",
+    )
+
+    failing = manager_module.PlatformSyncManager(
+        SimpleNamespace(), SimpleNamespace(enabled=True)
+    )
+    failed_calls = 0
+
+    async def fail_recovery(
+        _config: Any,
+        _entities: frozenset[str],
+        *,
+        before_matter_process_restart: Any,
+    ) -> Any:
+        nonlocal failed_calls
+        del before_matter_process_restart
+        failed_calls += 1
+        raise RuntimeError("safe simulated recovery failure")
+
+    manager_module.async_recover_matter_runtime = fail_recovery
+    try:
+        try:
+            await failing._async_attempt_matter_recovery(
+                recoverable, background=True
+            )
+        except RuntimeError:
+            check(True, "A failed recovery remains fail-closed")
+        else:
+            raise AssertionError("A failed recovery must propagate")
+        repeated = await failing._async_attempt_matter_recovery(
+            recoverable, background=True
+        )
+        blocked = await failing._async_attempt_matter_recovery(
+            targets.MatterbridgeRuntimeError(
+                "token_missing", expected, recoverable=False
+            ),
+            background=True,
+        )
+    finally:
+        manager_module.async_recover_matter_runtime = original_recover
+    check(
+        failed_calls == 1 and repeated is None,
+        "A failed episode never performs a second recovery attempt",
+    )
+    check(blocked is None, "Non-recoverable Matterbridge states never restart")
+    return 6
+
+
+async def check_matter_apply_restart_guard_across_reload() -> int:
+    """A later target failure cannot cause a second process restart on retry."""
+    selected = frozenset(
+        {const.TargetPlatform.GOOGLE, const.TargetPlatform.MATTER}
+    )
+    rules = {platform: models.PlatformRule() for platform in const.TargetPlatform}
+    config = SimpleNamespace(
+        enabled=True,
+        targets=selected,
+        user_rules=rules,
+        locked_rules=rules,
+        matter_host="matterbridge.test",
+        matter_port=8283,
+    )
+    hass = SimpleNamespace(bus=TransactionBus(), data={})
+    first_manager = manager_module.PlatformSyncManager(hass, config)
+    actual = {platform: frozenset() for platform in selected}
+    google_reads = 0
+    restart_authorizations: list[bool] = []
+    restarts_sent = 0
+
+    async def read_source(_hass: Any, _config: Any) -> Any:
+        return models.SourceSnapshot(entities=frozenset({"light.one"}))
+
+    async def read_target(
+        _hass: Any, _config: Any, platform: Any
+    ) -> frozenset[str]:
+        nonlocal google_reads
+        if platform is const.TargetPlatform.GOOGLE:
+            google_reads += 1
+            if google_reads == 2:
+                return frozenset()
+        return actual[platform]
+
+    async def validate_target(
+        _hass: Any, _config: Any, _platform: Any, _expected: Any
+    ) -> dict[str, Any]:
+        return {"loaded": True}
+
+    async def room_updates(
+        _hass: Any, _config: Any, _desired: Any, _rooms: Any
+    ) -> tuple[str, ...]:
+        return ()
+
+    async def prepare_target(_hass: Any, _config: Any, platform: Any) -> Any:
+        return SimpleNamespace(platform=platform, entities=actual[platform])
+
+    async def apply_target(
+        _hass: Any,
+        _config: Any,
+        plan: Any,
+        _rooms: Any,
+        **kwargs: Any,
+    ) -> bool:
+        nonlocal restarts_sent
+        actual[plan.platform] = plan.desired
+        if plan.platform is not const.TargetPlatform.MATTER:
+            return False
+        authorize = kwargs.get("before_matter_process_restart")
+        allowed = bool(authorize and authorize())
+        restart_authorizations.append(allowed)
+        if not allowed:
+            raise RuntimeError("simulated process restart blocked by guard")
+        guard = first_manager._matter_recovery_guard
+        check(
+            guard.process_restart_attempted and guard.last_attempt is not None,
+            "The manager records a process restart before the command is sent",
+        )
+        restarts_sent += 1
+        return True
+
+    async def restore_target(_hass: Any, _config: Any, backup: Any) -> None:
+        actual[backup.platform] = backup.entities
+
+    original_functions = (
+        manager_module.async_read_source,
+        manager_module.async_read_target,
+        manager_module.async_validate_target,
+        manager_module.async_google_room_updates,
+        manager_module.async_prepare_target,
+        manager_module.async_apply_plan,
+        manager_module.async_restore_target,
+    )
+    manager_module.async_read_source = read_source
+    manager_module.async_read_target = read_target
+    manager_module.async_validate_target = validate_target
+    manager_module.async_google_room_updates = room_updates
+    manager_module.async_prepare_target = prepare_target
+    manager_module.async_apply_plan = apply_target
+    manager_module.async_restore_target = restore_target
+    previous_log_state = manager_module._LOGGER.disabled
+    manager_module._LOGGER.disabled = True
+    try:
+        try:
+            await first_manager.async_reconcile(reason="first_apply", apply=True)
+        except RuntimeError as error:
+            check(
+                "google readback mismatch" in str(error),
+                "A later Google readback failure aborts the first transaction",
+            )
+        else:
+            raise AssertionError("The first transaction must fail after Matter restart")
+        check(
+            first_manager._matter_recovery_guard.attempted_for_episode,
+            "A later platform failure retains the Matter process-restart episode marker",
+        )
+
+        reloaded_manager = manager_module.PlatformSyncManager(hass, config)
+        check(
+            reloaded_manager._matter_recovery_guard
+            is first_manager._matter_recovery_guard,
+            "Config Entry reload reuses the endpoint recovery guard from hass.data",
+        )
+        try:
+            await reloaded_manager.async_reconcile(reason="retry_after_error", apply=True)
+        except RuntimeError as error:
+            check(
+                "blocked by guard" in str(error),
+                "The immediate retry fails closed when another restart is unauthorized",
+            )
+        else:
+            raise AssertionError("The cooldown must block an immediate process restart")
+    finally:
+        manager_module._LOGGER.disabled = previous_log_state
+        (
+            manager_module.async_read_source,
+            manager_module.async_read_target,
+            manager_module.async_validate_target,
+            manager_module.async_google_room_updates,
+            manager_module.async_prepare_target,
+            manager_module.async_apply_plan,
+            manager_module.async_restore_target,
+        ) = original_functions
+
+    check(
+        restart_authorizations == [True, False] and restarts_sent == 1,
+        "Apply and retry share one five-minute process-restart authorization",
+    )
+    check(
+        actual == {platform: frozenset() for platform in selected},
+        "Both failed transactions restore their exact pre-change target sets",
+    )
+    return 7
+
+
 async def check_config_entry_background_task_ownership() -> int:
     """A managed ConfigEntry exclusively owns scheduled background work."""
 
@@ -2393,7 +3420,7 @@ async def check_permanent_error_retry_stop() -> int:
 
     async def controlled_sleep(delay: int) -> None:
         sleeps.append(delay)
-        if len(sleeps) <= 2:
+        if len(sleeps) <= 7:
             return
         waiting_in_backoff.set()
         await never_release.wait()
@@ -2411,9 +3438,18 @@ async def check_permanent_error_retry_stop() -> int:
         manager_module.asyncio.sleep = original_sleep
 
     check(
-        calls == ["startup_scan", "retry_after_error"]
-        and sleeps == [2, 15, 15],
-        "Permanent errors enter repeated 15-second backoff before cancellation",
+        calls
+        == [
+            "startup_scan",
+            "retry_after_error",
+            "retry_after_error",
+            "retry_after_error",
+            "retry_after_error",
+            "retry_after_error",
+            "retry_after_error",
+        ]
+        and sleeps == [2, 15, 30, 60, 120, 300, 300, 300],
+        "Permanent errors follow the exact bounded retry schedule",
     )
     check(
         task.done()
@@ -2686,7 +3722,7 @@ async def check_manager_transaction() -> int:
         return SimpleNamespace(platform=platform)
 
     async def apply_success(
-        _hass: Any, _config: Any, plan: Any, _rooms: Any
+        _hass: Any, _config: Any, plan: Any, _rooms: Any, **_kwargs: Any
     ) -> None:
         success_steps.append(f"apply:{plan.platform.value}")
         success_actual[plan.platform] = plan.desired
@@ -2752,7 +3788,7 @@ async def check_manager_transaction() -> int:
         return SimpleNamespace(platform=platform, entities=failure_actual[platform])
 
     async def apply_failure(
-        _hass: Any, _config: Any, plan: Any, _rooms: Any
+        _hass: Any, _config: Any, plan: Any, _rooms: Any, **_kwargs: Any
     ) -> None:
         failure_steps.append(f"apply:{plan.platform.value}")
         # Model a target that changed partially before raising.  Its own backup
@@ -2955,7 +3991,7 @@ async def check_cancelled_transaction_rollback() -> int:
             return SimpleNamespace(platform=platform)
 
         async def apply_target(
-            _hass: Any, _config: Any, plan: Any, _rooms: Any
+            _hass: Any, _config: Any, plan: Any, _rooms: Any, **_kwargs: Any
         ) -> None:
             mutation_steps.append(f"apply:{plan.platform.value}")
             actual[plan.platform] = plan.desired
@@ -3184,7 +4220,11 @@ async def check_rollback_and_stop_deadlines() -> int:
     original_stop_timeout = manager_module.STOP_DRAIN_TIMEOUT_SECONDS
     manager_module.STOP_DRAIN_TIMEOUT_SECONDS = 0.01
     try:
-        await asyncio.wait_for(stop_manager.async_stop(), timeout=0.2)
+        stopped = await asyncio.wait_for(stop_manager.async_stop(), timeout=0.2)
+        check(
+            stopped is False,
+            "A stop deadline refuses to report a safely drained manager",
+        )
         check(
             stop_manager.state.rollback_status == "incomplete"
             and stop_manager.state.rollback_incomplete_targets == ["matter"],
@@ -3202,8 +4242,20 @@ async def check_rollback_and_stop_deadlines() -> int:
         direct_task not in stop_manager._direct_tasks,
         "A late-finishing direct task removes its own tracking entry",
     )
+
+    class RejectedStop:
+        async def async_stop(self) -> bool:
+            return False
+
+    unloaded = await integration_module.async_unload_entry(
+        SimpleNamespace(), SimpleNamespace(runtime_data=RejectedStop())
+    )
+    check(
+        unloaded is False,
+        "Config Entry unload remains loaded when manager drain is unverified",
+    )
     manager_module._LOGGER.disabled = original_logger_disabled
-    return 5
+    return 7
 
 
 async def check_diagnostics_privacy() -> int:
@@ -3294,7 +4346,14 @@ async def main() -> None:
     assertions += check_matter_runtime()
     assertions += check_matter_exact_configuration()
     assertions += await check_matter_validation_contract()
+    assertions += check_matter_recovery_guard()
+    assertions += await check_matter_apply_process_fallback()
+    assertions += await check_matter_restart_cancellation_marker()
+    assertions += await check_guarded_matter_runtime_recovery()
+    assertions += await check_matter_source_runtime_validation()
     assertions += await check_matter_request_overall_timeout()
+    assertions += await check_matter_backup_completion_handshake()
+    assertions += await check_matter_restart_is_fire_and_forget()
     assertions += check_google_room_schema()
     assertions += await check_single_switch_runtime()
     assertions += await check_safe_migration()
@@ -3305,6 +4364,10 @@ async def main() -> None:
     assertions += await check_startup_race_and_safe_stop()
     assertions += await check_startup_listener_lifecycle()
     assertions += await check_background_readiness_retry()
+    assertions += await check_retry_backoff_resets_after_success()
+    assertions += check_source_events_preserve_fault_backoff()
+    assertions += await check_matter_recovery_episode_and_cooldown()
+    assertions += await check_matter_apply_restart_guard_across_reload()
     assertions += await check_config_entry_background_task_ownership()
     assertions += await check_permanent_error_retry_stop()
     assertions += await check_selected_target_exact_reconciliation()

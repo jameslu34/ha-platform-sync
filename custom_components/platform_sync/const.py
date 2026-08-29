@@ -37,6 +37,8 @@ DEFAULT_GOOGLE_CONFIG_PATH = "google_assistant_entity_config.yaml"
 INTERNAL_DEBOUNCE_SECONDS = 2
 INTERNAL_POLL_SECONDS = 15
 INTERNAL_RETRY_SECONDS = 15
+INTERNAL_RETRY_MAX_SECONDS = 300
+INTERNAL_RETRY_DELAYS_SECONDS = (15, 30, 60, 120, 300)
 
 # Version 2.2 migration removes these former user-facing keys from existing
 # config entries.  They are never read by runtime configuration.

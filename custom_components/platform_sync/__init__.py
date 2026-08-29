@@ -205,7 +205,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: PlatformSyncConfigEntry)
 
 async def async_unload_entry(hass: HomeAssistant, entry: PlatformSyncConfigEntry) -> bool:
     """Unload without changing any platform exposure."""
-    await entry.runtime_data.async_stop()
+    if not await entry.runtime_data.async_stop():
+        return False
     if not PLATFORMS:
         return True
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 import json
@@ -22,6 +22,7 @@ from .models import TargetPlan, normalize_entities
 
 MATTER_PLUGIN = "matterbridge-hass"
 MATTER_REQUEST_TIMEOUT = 15.0
+MATTER_BACKUP_TIMEOUT = 120.0
 MATTER_RUNTIME_TIMEOUT = 60.0
 GOOGLE_SYNC_TIMEOUT = 30.0
 HOMEKIT_RELOAD_TIMEOUT = 60.0
@@ -58,6 +59,37 @@ class TargetBackup:
 
     platform: TargetPlatform
     payload: Any
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class MatterRuntimeSnapshot:
+    """One privacy-safe Matterbridge management snapshot."""
+
+    settings: Mapping[str, Any]
+    plugin: Mapping[str, Any]
+    plugin_config: Mapping[str, Any]
+    devices: Any
+    allowlist: frozenset[str]
+
+
+class MatterbridgeRuntimeError(RuntimeError):
+    """A classified Matterbridge runtime failure without remote error material."""
+
+    def __init__(
+        self,
+        reason: str,
+        expected: frozenset[str],
+        *,
+        recoverable: bool,
+    ) -> None:
+        self.reason = reason
+        self.expected = expected
+        self.recoverable = recoverable
+        super().__init__(f"Matterbridge runtime is not ready ({reason})")
+
+
+class MatterbridgeProcessRestartError(RuntimeError):
+    """A full Matterbridge restart was attempted but did not converge."""
 
 
 class HomeKitSourceEntryMissingError(RuntimeError):
@@ -416,6 +448,92 @@ async def _matter_request(
         raise RuntimeError(f"Matterbridge {command} timed out") from error
 
 
+async def _matter_fire_and_forget(
+    config: SyncConfig, command: str, payload: Mapping[str, Any] | None = None
+) -> None:
+    """Send a command whose successful execution closes the management socket."""
+    import aiohttp
+
+    url = f"ws://{config.matter_host}:{config.matter_port}/"
+    request = {
+        "id": secrets.randbelow(9_990_000) + 10_000,
+        "sender": "PlatformSync",
+        "method": f"/api/{command}",
+        "src": "Frontend",
+        "dst": "Matterbridge",
+        "params": dict(payload or {}),
+    }
+    try:
+        async with asyncio.timeout(MATTER_REQUEST_TIMEOUT):
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(url, heartbeat=20) as ws:
+                    await ws.send_json(request)
+    except TimeoutError as error:
+        raise RuntimeError(
+            f"Matterbridge {command} command could not be sent"
+        ) from error
+    except Exception as error:
+        raise RuntimeError(
+            f"Matterbridge {command} command could not be sent"
+        ) from error
+
+
+async def _matter_create_backup_ready(config: SyncConfig) -> None:
+    """Wait for both the backup request acknowledgement and archive completion."""
+    import aiohttp
+
+    url = f"ws://{config.matter_host}:{config.matter_port}/"
+    request_id = secrets.randbelow(9_990_000) + 10_000
+    request = {
+        "id": request_id,
+        "sender": "PlatformSync",
+        "method": "/api/create-backup",
+        "src": "Frontend",
+        "dst": "Matterbridge",
+        "params": {},
+    }
+    acknowledged = False
+    archive_ready = False
+    try:
+        async with asyncio.timeout(MATTER_BACKUP_TIMEOUT):
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(url, heartbeat=20) as ws:
+                    await ws.send_json(request)
+                    while not (acknowledged and archive_ready):
+                        message = await ws.receive()
+                        if message.type is not aiohttp.WSMsgType.TEXT:
+                            raise RuntimeError(
+                                "Matterbridge backup returned no JSON response"
+                            )
+                        response = json.loads(message.data)
+                        if response.get("id") == request_id:
+                            if response.get("error") or not response.get("success"):
+                                raise RuntimeError(
+                                    "Matterbridge backup request failed"
+                                )
+                            acknowledged = True
+                            continue
+                        archive = response.get("response")
+                        if (
+                            response.get("id") == 0
+                            and response.get("method") == "archive"
+                            and response.get("success") is True
+                            and isinstance(archive, Mapping)
+                            and archive.get("command") == "zip"
+                            and isinstance(archive.get("archivePath"), str)
+                            and archive["archivePath"].endswith(
+                                "matterbridge.backup.zip"
+                            )
+                        ):
+                            archive_ready = True
+    except TimeoutError as error:
+        raise RuntimeError(
+            "Matterbridge backup did not complete before the safety deadline"
+        ) from error
+    except Exception as error:
+        raise RuntimeError("Matterbridge backup completion is unverified") from error
+
+
 def _find_matter_plugin(value: Any) -> Mapping[str, Any]:
     candidates = (
         value
@@ -523,6 +641,139 @@ def _matter_loaded_device_count(
     return registered
 
 
+def _matter_information(settings: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    information = settings.get("matterbridgeInformation", settings)
+    return information if isinstance(information, Mapping) else None
+
+
+def _matter_token_configured(plugin_config: Mapping[str, Any]) -> bool:
+    token = plugin_config.get("token")
+    return isinstance(token, str) and bool(token.strip())
+
+
+def _matter_runtime_issue(
+    snapshot: MatterRuntimeSnapshot, expected: frozenset[str]
+) -> str | None:
+    """Return a stable, non-sensitive runtime reason code."""
+    information = _matter_information(snapshot.settings)
+    if information is None:
+        return "bridge_state_unverified"
+    if str(information.get("bridgeStatus", "")).casefold() != "started":
+        return "bridge_not_started"
+    if snapshot.plugin.get("enabled") is not True:
+        return "plugin_disabled"
+    if not _matter_token_configured(snapshot.plugin_config):
+        return "token_missing"
+    if not expected or snapshot.allowlist != expected:
+        return "allowlist_mismatch"
+    if snapshot.plugin.get("error"):
+        return "plugin_error"
+    if (
+        snapshot.plugin.get("restartRequired")
+        or information.get("restartRequired")
+        or information.get("fixedRestartRequired")
+    ):
+        return "restart_required"
+    if (
+        snapshot.plugin.get("loaded") is not True
+        or snapshot.plugin.get("started") is not True
+    ):
+        return "plugin_not_started"
+    loaded_devices = _matter_loaded_device_count(
+        snapshot.plugin, snapshot.devices, expected
+    )
+    if loaded_devices is not None:
+        return None
+    registered = snapshot.plugin.get("registeredDevices")
+    if (
+        expected
+        and registered == 0
+        and isinstance(snapshot.devices, list)
+        and not snapshot.devices
+    ):
+        return "devices_zero"
+    return "device_state_unverified"
+
+
+def _matter_recovery_eligible(
+    snapshot: MatterRuntimeSnapshot, expected: frozenset[str]
+) -> bool:
+    """Allow process recovery only for a narrow, fully verified failure set."""
+    information = _matter_information(snapshot.settings)
+    if (
+        not expected
+        or information is None
+        or str(information.get("bridgeStatus", "")).casefold() != "started"
+        or snapshot.plugin.get("name") != MATTER_PLUGIN
+        or snapshot.plugin.get("enabled") is not True
+        or not _matter_token_configured(snapshot.plugin_config)
+    ):
+        return False
+    try:
+        configured = _strict_matter_allowlist(snapshot.plugin_config)
+        _require_empty_matter_filters(snapshot.plugin_config)
+    except RuntimeError:
+        return False
+    if configured != expected or snapshot.allowlist != expected:
+        return False
+    return _matter_runtime_issue(snapshot, expected) in {
+        "plugin_error",
+        "restart_required",
+        "plugin_not_started",
+        "devices_zero",
+    }
+
+
+def _matter_runtime_payload(
+    snapshot: MatterRuntimeSnapshot, expected: frozenset[str]
+) -> dict[str, Any]:
+    loaded_devices = _matter_loaded_device_count(
+        snapshot.plugin, snapshot.devices, expected
+    )
+    if loaded_devices is None:
+        raise MatterbridgeRuntimeError(
+            "device_state_unverified", expected, recoverable=False
+        )
+    return {
+        "loaded": True,
+        "bridge_status": "started",
+        "plugin_enabled": True,
+        "plugin_loaded": True,
+        "plugin_started": True,
+        "plugin_error": False,
+        "restart_required": False,
+        "registered_devices": loaded_devices,
+        "loaded_devices": loaded_devices,
+        "filter_by_area": "",
+        "filter_by_label": "",
+        "virtual_control_label": "",
+    }
+
+
+async def _read_matter_runtime_snapshot(
+    config: SyncConfig,
+) -> MatterRuntimeSnapshot:
+    """Read all Matterbridge state needed for one bounded validation attempt."""
+    plugins = await _matter_request(config, "plugins")
+    plugin = _find_matter_plugin(plugins)
+    plugin_config = _matter_plugin_config(plugin)
+    allowlist = _strict_matter_allowlist(plugin_config)
+    _require_empty_matter_filters(plugin_config)
+    settings = await _matter_request(config, "settings")
+    if not isinstance(settings, Mapping):
+        raise RuntimeError("Matterbridge settings response is unavailable")
+    devices = await _matter_request(
+        config, "devices", {"pluginName": MATTER_PLUGIN}
+    )
+    return MatterRuntimeSnapshot(
+        settings=settings,
+        plugin=plugin,
+        plugin_config=plugin_config,
+        devices=devices,
+        allowlist=allowlist,
+    )
+
+
 async def _wait_matter_runtime(
     config: SyncConfig, expected: frozenset[str], timeout: float = MATTER_RUNTIME_TIMEOUT
 ) -> dict[str, Any]:
@@ -531,34 +782,15 @@ async def _wait_matter_runtime(
         async with asyncio.timeout(timeout):
             while True:
                 try:
-                    plugins = await _matter_request(config, "plugins")
-                    plugin = _find_matter_plugin(plugins)
-                    settings = await _matter_request(config, "settings")
-                    devices = await _matter_request(
-                        config, "devices", {"pluginName": MATTER_PLUGIN}
+                    snapshot = await _read_matter_runtime_snapshot(config)
+                    reason = _matter_runtime_issue(snapshot, expected)
+                    if reason is None:
+                        return _matter_runtime_payload(snapshot, expected)
+                    last_error = MatterbridgeRuntimeError(
+                        reason,
+                        expected,
+                        recoverable=_matter_recovery_eligible(snapshot, expected),
                     )
-                    plugin_config = _matter_plugin_config(plugin)
-                    actual = _strict_matter_allowlist(plugin_config)
-                    _require_empty_matter_filters(plugin_config)
-                    loaded_devices = _matter_loaded_device_count(
-                        plugin, devices, expected
-                    )
-                    if (
-                        _matter_runtime_ready(settings, plugin)
-                        and loaded_devices is not None
-                        and actual == expected
-                    ):
-                        return {
-                            "loaded": True,
-                            "bridge_status": "started",
-                            "plugin_enabled": True,
-                            "plugin_loaded": True,
-                            "plugin_started": True,
-                            "plugin_error": False,
-                            "restart_required": False,
-                            "registered_devices": loaded_devices,
-                            "loaded_devices": loaded_devices,
-                        }
                 except Exception as error:  # Briefly unavailable while restarting.
                     last_error = error
                 await asyncio.sleep(2)
@@ -567,6 +799,48 @@ async def _wait_matter_runtime(
     if last_error:
         raise RuntimeError("Matterbridge runtime did not become ready") from last_error
     raise RuntimeError("Matterbridge runtime did not converge to the expected allowlist")
+
+
+async def async_recover_matter_runtime(
+    config: SyncConfig,
+    expected: frozenset[str],
+    *,
+    before_matter_process_restart: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Back up, restart the plugin, then use one guarded process fallback."""
+    snapshot = await _read_matter_runtime_snapshot(config)
+    reason = _matter_runtime_issue(snapshot, expected)
+    if reason is None:
+        return _matter_runtime_payload(snapshot, expected)
+    if not _matter_recovery_eligible(snapshot, expected):
+        raise MatterbridgeRuntimeError(reason, expected, recoverable=False)
+    await _matter_create_backup_ready(config)
+    await _matter_request(config, "restartplugin", {"pluginName": MATTER_PLUGIN})
+    try:
+        return await _wait_matter_runtime(config, expected)
+    except Exception as plugin_restart_error:
+        snapshot = await _read_matter_runtime_snapshot(config)
+        reason = _matter_runtime_issue(snapshot, expected)
+        if reason is None:
+            return _matter_runtime_payload(snapshot, expected)
+        if not _matter_recovery_eligible(snapshot, expected):
+            raise RuntimeError(
+                "Matterbridge plugin restart did not converge safely"
+            ) from plugin_restart_error
+        if (
+            before_matter_process_restart is None
+            or not before_matter_process_restart()
+        ):
+            raise RuntimeError(
+                "Matterbridge process restart was blocked by the recovery guard"
+            ) from plugin_restart_error
+        try:
+            await _matter_fire_and_forget(config, "restart", {})
+            return await _wait_matter_runtime(config, expected)
+        except Exception as process_restart_error:
+            raise MatterbridgeProcessRestartError(
+                "Matterbridge process restart did not restore the runtime"
+            ) from process_restart_error
 
 
 async def async_read_target(
@@ -662,36 +936,17 @@ async def async_validate_target(
             "duplicates": 0,
         }
 
-    plugins = await _matter_request(config, "plugins")
-    plugin = _find_matter_plugin(plugins)
-    plugin_config = _matter_plugin_config(plugin)
-    settings = await _matter_request(config, "settings")
-    devices = await _matter_request(
-        config, "devices", {"pluginName": MATTER_PLUGIN}
-    )
-    actual = _strict_matter_allowlist(plugin_config)
-    if actual != expected:
+    snapshot = await _read_matter_runtime_snapshot(config)
+    if snapshot.allowlist != expected:
         raise RuntimeError("Matterbridge exact allowlist readback mismatch")
-    _require_empty_matter_filters(plugin_config)
-    if not _matter_runtime_ready(settings, plugin):
-        raise RuntimeError("Matterbridge runtime is not fully started")
-    loaded_devices = _matter_loaded_device_count(plugin, devices, expected)
-    if loaded_devices is None:
-        raise RuntimeError("Matterbridge plugin device load state is not exact")
-    return {
-        "loaded": True,
-        "bridge_status": "started",
-        "plugin_enabled": True,
-        "plugin_loaded": True,
-        "plugin_started": True,
-        "plugin_error": False,
-        "restart_required": False,
-        "registered_devices": loaded_devices,
-        "loaded_devices": loaded_devices,
-        "filter_by_area": "",
-        "filter_by_label": "",
-        "virtual_control_label": "",
-    }
+    reason = _matter_runtime_issue(snapshot, expected)
+    if reason is not None:
+        raise MatterbridgeRuntimeError(
+            reason,
+            expected,
+            recoverable=_matter_recovery_eligible(snapshot, expected),
+        )
+    return _matter_runtime_payload(snapshot, expected)
 
 
 async def async_prepare_target(
@@ -733,7 +988,7 @@ async def async_prepare_target(
     plugins = await _matter_request(config, "plugins")
     plugin_config = _matter_plugin_config(_find_matter_plugin(plugins))
     _require_empty_matter_filters(plugin_config)
-    await _matter_request(config, "create-backup", {})
+    await _matter_create_backup_ready(config)
     return TargetBackup(
         platform,
         {
@@ -845,7 +1100,12 @@ async def _save_matter_config(
     await _matter_request(config, "restartplugin", {"pluginName": MATTER_PLUGIN})
 
 
-async def _apply_matter(config: SyncConfig, desired: frozenset[str]) -> None:
+async def _apply_matter(
+    config: SyncConfig,
+    desired: frozenset[str],
+    *,
+    before_matter_process_restart: Callable[[], bool] | None = None,
+) -> bool:
     if not desired:
         raise RuntimeError(
             "Matterbridge whiteList cannot be empty because empty exposes everything"
@@ -863,7 +1123,37 @@ async def _apply_matter(config: SyncConfig, desired: frozenset[str]) -> None:
     plugin_config["splitEntities"] = []
     plugin_config["splitByLabel"] = ""
     await _save_matter_config(config, plugin_config)
-    await _wait_matter_runtime(config, desired)
+    try:
+        await _wait_matter_runtime(config, desired)
+        return False
+    except Exception as plugin_restart_error:
+        # A plugin restart can remain wedged after a Home Assistant outage.  A
+        # whole-process restart is allowed once only when the management API
+        # can prove that credentials and the exact filter configuration are
+        # intact.  The caller already captured a pre-change backup.
+        snapshot = await _read_matter_runtime_snapshot(config)
+        reason = _matter_runtime_issue(snapshot, desired)
+        if reason is None:
+            return False
+        if not _matter_recovery_eligible(snapshot, desired):
+            raise RuntimeError(
+                "Matterbridge plugin restart did not converge safely"
+            ) from plugin_restart_error
+        if (
+            before_matter_process_restart is None
+            or not before_matter_process_restart()
+        ):
+            raise RuntimeError(
+                "Matterbridge process restart was blocked by the recovery guard"
+            ) from plugin_restart_error
+        try:
+            await _matter_fire_and_forget(config, "restart", {})
+            await _wait_matter_runtime(config, desired)
+        except Exception as process_restart_error:
+            raise MatterbridgeProcessRestartError(
+                "Matterbridge process restart did not restore the runtime"
+            ) from process_restart_error
+        return True
 
 
 async def async_apply_plan(
@@ -871,14 +1161,21 @@ async def async_apply_plan(
     config: SyncConfig,
     plan: TargetPlan,
     rooms: Mapping[str, str] | None = None,
-) -> None:
-    """Apply one exact plan using the least disruptive target mechanism."""
+    *,
+    before_matter_process_restart: Callable[[], bool] | None = None,
+) -> bool:
+    """Apply one exact plan and report a full Matterbridge process restart."""
     if plan.platform is TargetPlatform.GOOGLE:
         await _apply_google(hass, config, plan.desired, rooms or {})
+        return False
     elif plan.platform is TargetPlatform.HOMEKIT:
         await _apply_homekit(hass, config, plan.desired)
-    else:
-        await _apply_matter(config, plan.desired)
+        return False
+    return await _apply_matter(
+        config,
+        plan.desired,
+        before_matter_process_restart=before_matter_process_restart,
+    )
 
 
 async def async_restore_target(

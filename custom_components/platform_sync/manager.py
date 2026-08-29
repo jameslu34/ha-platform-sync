@@ -19,28 +19,54 @@ from homeassistant.helpers.event import async_track_time_interval
 
 from .config import SyncConfig
 from .const import (
+    DOMAIN,
     EVENT_SYNC_COMPLETED,
     EVENT_SYNC_FAILED,
     INTERNAL_DEBOUNCE_SECONDS,
     INTERNAL_POLL_SECONDS,
-    INTERNAL_RETRY_SECONDS,
+    INTERNAL_RETRY_DELAYS_SECONDS,
     SourceKind,
     TargetPlatform,
 )
 from .models import SourceSnapshot, TargetPlan, evaluate_target
-from .sources import async_read_source, async_find_apple_tv_entities
+from .sources import async_find_apple_tv_entities, async_read_source
 from .targets import (
+    GOOGLE_SYNC_TIMEOUT,
+    HOMEKIT_RELOAD_TIMEOUT,
+    MATTER_BACKUP_TIMEOUT,
+    MATTER_REQUEST_TIMEOUT,
+    MATTER_RUNTIME_TIMEOUT,
+    MatterbridgeRuntimeError,
     async_apply_plan,
     async_google_room_updates,
     async_prepare_target,
     async_read_target,
+    async_recover_matter_runtime,
     async_restore_target,
     async_validate_target,
 )
 
 _LOGGER = logging.getLogger(__name__)
-ROLLBACK_TIMEOUT_SECONDS = 100.0
-STOP_DRAIN_TIMEOUT_SECONDS = 105.0
+ROLLBACK_SAFETY_MARGIN_SECONDS = 15.0
+STOP_DRAIN_SAFETY_MARGIN_SECONDS = 5.0
+# A cancelled all-target transaction may have to restore Google, HomeKit and
+# Matter in reverse order. Matter restoration can consume two management
+# requests, one runtime wait, and one three-request exact validation. Keep one
+# explicit budget for the complete rollback instead of letting HA unload return
+# while a process-restart rollback is still unverified.
+ROLLBACK_TIMEOUT_SECONDS = (
+    GOOGLE_SYNC_TIMEOUT
+    + HOMEKIT_RELOAD_TIMEOUT
+    + MATTER_RUNTIME_TIMEOUT
+    + 5 * MATTER_REQUEST_TIMEOUT
+    + ROLLBACK_SAFETY_MARGIN_SECONDS
+)
+STOP_DRAIN_TIMEOUT_SECONDS = (
+    max(ROLLBACK_TIMEOUT_SECONDS, MATTER_BACKUP_TIMEOUT)
+    + STOP_DRAIN_SAFETY_MARGIN_SECONDS
+)
+MATTER_RECOVERY_COOLDOWN_SECONDS = 300.0
+MATTER_RECOVERY_GUARDS_KEY = "matter_recovery_guards"
 
 
 @dataclass(slots=True)
@@ -56,6 +82,40 @@ class SyncState:
     error: str | None = None
     rollback_status: str = "not_needed"
     rollback_incomplete_targets: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class MatterRecoveryGuard:
+    """Endpoint recovery state shared across Config Entry reloads."""
+
+    attempted_for_episode: bool = False
+    last_attempt: float | None = None
+    active_token: object | None = None
+    process_restart_attempted: bool = False
+
+
+def _matter_recovery_guard(
+    hass: HomeAssistant, config: SyncConfig
+) -> MatterRecoveryGuard:
+    """Return the endpoint guard retained in hass.data across entry reloads."""
+    data = getattr(hass, "data", None)
+    if not isinstance(data, dict):
+        return MatterRecoveryGuard()
+    domain_data = data.setdefault(DOMAIN, {})
+    if not isinstance(domain_data, dict):
+        return MatterRecoveryGuard()
+    guards = domain_data.setdefault(MATTER_RECOVERY_GUARDS_KEY, {})
+    if not isinstance(guards, dict):
+        return MatterRecoveryGuard()
+    endpoint = (
+        str(getattr(config, "matter_host", "")).strip().casefold(),
+        str(getattr(config, "matter_port", "")),
+    )
+    guard = guards.get(endpoint)
+    if not isinstance(guard, MatterRecoveryGuard):
+        guard = MatterRecoveryGuard()
+        guards[endpoint] = guard
+    return guard
 
 
 class PlatformSyncManager:
@@ -74,6 +134,7 @@ class PlatformSyncManager:
         self._lock = asyncio.Lock()
         self._debounce_task: asyncio.Task[None] | None = None
         self._reconcile_active = False
+        self._retry_backoff_active = False
         self._pending_reason: str | None = None
         self._startup_scan_pending = False
         self._startup_scan_required = False
@@ -82,6 +143,7 @@ class PlatformSyncManager:
         self._listeners: list[Callable[[], None]] = []
         self._direct_tasks: set[asyncio.Task[Any]] = set()
         self._active_attempted_targets: set[TargetPlatform] = set()
+        self._matter_recovery_guard = _matter_recovery_guard(hass, config)
 
     async def async_start(self) -> None:
         """Start only when the master switch is enabled."""
@@ -139,7 +201,7 @@ class PlatformSyncManager:
             )
             self._unsubscribers.append(startup_unsubscribe)
 
-    async def async_stop(self) -> None:
+    async def async_stop(self) -> bool:
         """Cancel background work safely and drain direct transactions."""
         self._stopping = True
         for unsubscribe in self._unsubscribers:
@@ -151,7 +213,12 @@ class PlatformSyncManager:
         task = self._debounce_task
         current_task = asyncio.current_task()
         if task is current_task:
-            return
+            self.state.status = "error"
+            self.state.error = (
+                "Synchronization cannot unload from its active background task"
+            )
+            _LOGGER.error(self.state.error)
+            return False
         direct_tasks = [
             active
             for active in self._direct_tasks
@@ -206,6 +273,7 @@ class PlatformSyncManager:
             _LOGGER.error(self.state.error)
         if self._debounce_task is task and (task is None or task.done()):
             self._debounce_task = None
+        return not pending and lock_drained
 
     def _start_fallback_polling(self) -> None:
         """Poll only when the source has no reliable push event."""
@@ -226,6 +294,119 @@ class PlatformSyncManager:
     @callback
     def _handle_poll(self, now: Any) -> None:
         self.schedule("source_poll")
+
+    def _clear_matter_recovery_episode(self) -> None:
+        """End one failure episode while retaining its cooldown timestamp."""
+        guard = self._matter_recovery_guard
+        guard.attempted_for_episode = False
+        guard.active_token = None
+        guard.process_restart_attempted = False
+
+    def _reserve_matter_recovery_episode(self) -> object | None:
+        """Reserve one complete recovery flow for the current failure episode."""
+        guard = self._matter_recovery_guard
+        if guard.attempted_for_episode:
+            return None
+        now = asyncio.get_running_loop().time()
+        if (
+            guard.last_attempt is not None
+            and now - guard.last_attempt < MATTER_RECOVERY_COOLDOWN_SECONDS
+        ):
+            return None
+        token = object()
+        guard.attempted_for_episode = True
+        guard.last_attempt = now
+        guard.active_token = token
+        guard.process_restart_attempted = False
+        return token
+
+    def _before_matter_process_restart(self, token: object | None = None) -> bool:
+        """Authorize and record one process restart before the command is sent."""
+        if not self.config.enabled or self._stopping:
+            return False
+        guard = self._matter_recovery_guard
+        now = asyncio.get_running_loop().time()
+        if token is not None:
+            if not guard.attempted_for_episode or guard.active_token is not token:
+                return False
+        else:
+            if guard.attempted_for_episode or (
+                guard.last_attempt is not None
+                and now - guard.last_attempt < MATTER_RECOVERY_COOLDOWN_SECONDS
+            ):
+                return False
+            guard.attempted_for_episode = True
+        guard.active_token = None
+        guard.last_attempt = now
+        guard.process_restart_attempted = True
+        return True
+
+    async def _async_attempt_matter_recovery(
+        self, error: MatterbridgeRuntimeError, *, background: bool
+    ) -> dict[str, Any] | None:
+        """Run at most one guarded runtime recovery per failure episode."""
+        if (
+            not self.config.enabled
+            or self._stopping
+            or not background
+            or not error.recoverable
+        ):
+            return None
+        recovery_token = self._reserve_matter_recovery_episode()
+        if recovery_token is None:
+            return None
+        _LOGGER.warning(
+            "Attempting one guarded Matterbridge runtime recovery (%s)",
+            error.reason,
+        )
+        runtime = await async_recover_matter_runtime(
+            self.config,
+            error.expected,
+            before_matter_process_restart=lambda: self._before_matter_process_restart(
+                recovery_token
+            ),
+        )
+        self._clear_matter_recovery_episode()
+        return runtime
+
+    async def _async_read_source_with_recovery(
+        self, *, background: bool
+    ) -> SourceSnapshot:
+        try:
+            source = await async_read_source(self.hass, self.config)
+        except MatterbridgeRuntimeError as error:
+            runtime = await self._async_attempt_matter_recovery(
+                error, background=background
+            )
+            if runtime is None:
+                raise
+            source = await async_read_source(self.hass, self.config)
+        if getattr(self.config, "source_kind", None) is SourceKind.MATTER:
+            self._clear_matter_recovery_episode()
+        return source
+
+    async def _async_validate_target_with_recovery(
+        self,
+        platform: TargetPlatform,
+        expected: frozenset[str],
+        *,
+        background: bool,
+    ) -> dict[str, Any]:
+        try:
+            runtime = await async_validate_target(
+                self.hass, self.config, platform, expected
+            )
+        except MatterbridgeRuntimeError as error:
+            if platform is not TargetPlatform.MATTER:
+                raise
+            runtime = await self._async_attempt_matter_recovery(
+                error, background=background
+            )
+            if runtime is None:
+                raise
+        if platform is TargetPlatform.MATTER:
+            self._clear_matter_recovery_episode()
+        return runtime
 
     @callback
     def _handle_homekit_config_entry_change(self, change: Any, entry: Any) -> None:
@@ -252,6 +433,13 @@ class PlatformSyncManager:
                 # A target update can synchronously emit a HomeKit config-entry
                 # event.  Queue one follow-up instead of cancelling the running
                 # transaction from inside its own task.
+                if self._startup_scan_required and reason != "startup_scan":
+                    return
+                self._pending_reason = reason
+                return
+            if self._retry_backoff_active:
+                # Polls and push events must not cancel the bounded fault
+                # backoff and turn a persistent outage into a hot loop.
                 if self._startup_scan_required and reason != "startup_scan":
                     return
                 self._pending_reason = reason
@@ -289,11 +477,13 @@ class PlatformSyncManager:
 
     async def _delayed_reconcile(self, reason: str) -> None:
         delay = INTERNAL_DEBOUNCE_SECONDS
+        retry_index = 0
         current_reason = reason
         startup_cycle_active = reason == "startup_scan"
         try:
             while self.config.enabled and not self._stopping:
                 await asyncio.sleep(delay)
+                self._retry_backoff_active = False
                 if current_reason == "startup_scan":
                     self._startup_scan_pending = False
                     startup_cycle_active = True
@@ -323,7 +513,16 @@ class PlatformSyncManager:
                     startup_cycle_active = (
                         startup_cycle_active or current_reason == "startup_scan"
                     )
-                    delay = INTERNAL_DEBOUNCE_SECONDS
+                    if result["status"] == "error":
+                        delay = INTERNAL_RETRY_DELAYS_SECONDS[retry_index]
+                        retry_index = min(
+                            retry_index + 1,
+                            len(INTERNAL_RETRY_DELAYS_SECONDS) - 1,
+                        )
+                        self._retry_backoff_active = True
+                    else:
+                        retry_index = 0
+                        delay = INTERNAL_DEBOUNCE_SECONDS
                     continue
                 if result["status"] != "error":
                     return
@@ -331,10 +530,15 @@ class PlatformSyncManager:
                 # reached LOADED.  Stay fail-closed and retry without producing
                 # an unhandled background-task exception or a hot loop.
                 current_reason = "retry_after_error"
-                delay = INTERNAL_RETRY_SECONDS
+                delay = INTERNAL_RETRY_DELAYS_SECONDS[retry_index]
+                retry_index = min(
+                    retry_index + 1, len(INTERNAL_RETRY_DELAYS_SECONDS) - 1
+                )
+                self._retry_backoff_active = True
         except asyncio.CancelledError:
             return
         finally:
+            self._retry_backoff_active = False
             if self._debounce_task is asyncio.current_task():
                 self._debounce_task = None
 
@@ -370,7 +574,9 @@ class PlatformSyncManager:
             self.state.last_reason = reason
             self.state.error = None
             try:
-                source = await async_read_source(self.hass, self.config)
+                source = await self._async_read_source_with_recovery(
+                    background=_background
+                )
                 dynamic_homekit_exclude = (
                     await async_find_apple_tv_entities(self.hass)
                     if getattr(
@@ -411,8 +617,10 @@ class PlatformSyncManager:
                                 metadata_updates=metadata_updates,
                             )
                     plans[platform] = plan
-                    runtime[platform] = await async_validate_target(
-                        self.hass, self.config, platform, current
+                    runtime[platform] = await self._async_validate_target_with_recovery(
+                        platform,
+                        current,
+                        background=_background,
                     )
 
                 effective_apply = bool(apply)
@@ -434,9 +642,20 @@ class PlatformSyncManager:
                         for plan in changed:
                             attempted.append(plan.platform)
                             self._active_attempted_targets.add(plan.platform)
-                            await async_apply_plan(
-                                self.hass, self.config, plan, source.rooms
-                            )
+                            if plan.platform is TargetPlatform.MATTER:
+                                await async_apply_plan(
+                                    self.hass,
+                                    self.config,
+                                    plan,
+                                    source.rooms,
+                                    before_matter_process_restart=(
+                                        self._before_matter_process_restart
+                                    ),
+                                )
+                            else:
+                                await async_apply_plan(
+                                    self.hass, self.config, plan, source.rooms
+                                )
 
                         # A changed transaction is not complete until every
                         # target has been read back and runtime-validated.
@@ -509,6 +728,8 @@ class PlatformSyncManager:
                         self.state.rollback_incomplete_targets = []
                         self._active_attempted_targets.clear()
                         raise
+                    if TargetPlatform.MATTER in verified:
+                        self._clear_matter_recovery_episode()
 
                 self.state.plans = {}
                 for platform, plan in plans.items():

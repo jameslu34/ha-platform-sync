@@ -153,8 +153,11 @@ async def async_read_source(hass: HomeAssistant, config: SyncConfig) -> SourceSn
     if config.source_kind is SourceKind.MANUAL:
         return SourceSnapshot(config.source_entities, source_revision="manual")
     platform = TargetPlatform(config.source_kind.value)
-    from .targets import async_read_platform_source
+    from .targets import async_read_platform_source, async_validate_target
+
     entities = await async_read_platform_source(hass, config, platform)
+    if platform is TargetPlatform.MATTER:
+        await async_validate_target(hass, config, platform, entities)
     return SourceSnapshot(entities, source_revision=platform.value)
 
 
