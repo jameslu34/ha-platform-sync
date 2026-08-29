@@ -9,5 +9,6 @@
   "documentation": "https://github.com/jameslu34/ha-platform-sync",
   "issue_tracker": "https://github.com/jameslu34/ha-platform-sync/issues",
   "codeowners": ["@jameslu34"],
+  "after_dependencies": ["homekit", "lovelace"],
   "requirements": []
 }

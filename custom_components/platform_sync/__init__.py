@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 
 from .config import SyncConfig, normalize_dashboard_pages
@@ -38,6 +39,8 @@ from .manager import PlatformSyncManager
 from .models import parse_rules, serialize_rules
 
 type PlatformSyncConfigEntry = ConfigEntry[PlatformSyncManager]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_migrate_entry(
