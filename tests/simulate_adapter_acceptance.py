@@ -2449,6 +2449,198 @@ class TransactionBus:
         self.events.append((event, data))
 
 
+async def check_selected_target_exact_reconciliation() -> int:
+    """Only selected targets converge, including removal of target-only exposures."""
+    selected = const.TargetPlatform.GOOGLE
+    user_rules = {
+        platform: models.PlatformRule() for platform in const.TargetPlatform
+    }
+    locked_rules = {
+        platform: models.PlatformRule() for platform in const.TargetPlatform
+    }
+    user_rules[selected] = models.PlatformRule(
+        include=frozenset({"switch.user_included"}),
+        exclude=frozenset(
+            {"light.user_excluded", "input_boolean.locked_required"}
+        ),
+    )
+    locked_rules[selected] = models.PlatformRule(
+        include=frozenset({"input_boolean.locked_required"}),
+        exclude=frozenset({"input_boolean.locked_excluded"}),
+    )
+    config = SimpleNamespace(
+        enabled=True,
+        targets=frozenset({selected}),
+        user_rules=user_rules,
+        locked_rules=locked_rules,
+    )
+    desired = frozenset(
+        {
+            "light.from_source",
+            "switch.user_included",
+            "input_boolean.locked_required",
+        }
+    )
+    expected_removed = frozenset(
+        {
+            "light.target_only",
+            "light.user_excluded",
+            "input_boolean.locked_excluded",
+        }
+    )
+    actual = {
+        selected: frozenset(
+            {
+                "light.from_source",
+                "light.target_only",
+                "light.user_excluded",
+                "switch.user_included",
+                "input_boolean.locked_excluded",
+            }
+        ),
+        const.TargetPlatform.HOMEKIT: frozenset({"light.homekit_untouched"}),
+        const.TargetPlatform.MATTER: frozenset({"light.matter_untouched"}),
+    }
+    touched: list[tuple[str, Any]] = []
+    applied_plans: list[Any] = []
+
+    async def read_source(_hass: Any, _config: Any) -> Any:
+        return models.SourceSnapshot(
+            entities=frozenset(
+                {
+                    "light.from_source",
+                    "light.user_excluded",
+                    "input_boolean.locked_excluded",
+                }
+            )
+        )
+
+    async def read_target(
+        _hass: Any, _config: Any, platform: Any
+    ) -> frozenset[str]:
+        touched.append(("read", platform))
+        if platform is not selected:
+            raise AssertionError("an unselected target must not be read")
+        return actual[platform]
+
+    async def validate_target(
+        _hass: Any, _config: Any, platform: Any, _expected: Any
+    ) -> dict[str, Any]:
+        touched.append(("validate", platform))
+        if platform is not selected:
+            raise AssertionError("an unselected target must not be validated")
+        return {"loaded": True}
+
+    async def no_room_updates(
+        _hass: Any, _config: Any, _desired: Any, _rooms: Any
+    ) -> tuple[str, ...]:
+        return ()
+
+    async def prepare_target(_hass: Any, _config: Any, platform: Any) -> Any:
+        touched.append(("prepare", platform))
+        if platform is not selected:
+            raise AssertionError("an unselected target must not be prepared")
+        return SimpleNamespace(platform=platform)
+
+    async def apply_target(
+        _hass: Any, _config: Any, plan: Any, _rooms: Any
+    ) -> None:
+        touched.append(("apply", plan.platform))
+        if plan.platform is not selected:
+            raise AssertionError("an unselected target must not be applied")
+        applied_plans.append(plan)
+        actual[plan.platform] = plan.desired
+
+    async def unexpected_restore(_hass: Any, _config: Any, _backup: Any) -> None:
+        raise AssertionError("successful exact reconciliation must not roll back")
+
+    original_functions = (
+        manager_module.async_read_source,
+        manager_module.async_read_target,
+        manager_module.async_validate_target,
+        manager_module.async_google_room_updates,
+        manager_module.async_prepare_target,
+        manager_module.async_apply_plan,
+        manager_module.async_restore_target,
+    )
+    manager_module.async_read_source = read_source
+    manager_module.async_read_target = read_target
+    manager_module.async_validate_target = validate_target
+    manager_module.async_google_room_updates = no_room_updates
+    manager_module.async_prepare_target = prepare_target
+    manager_module.async_apply_plan = apply_target
+    manager_module.async_restore_target = unexpected_restore
+    try:
+        manager = manager_module.PlatformSyncManager(
+            SimpleNamespace(bus=TransactionBus()), config
+        )
+        preview = await manager.async_reconcile(reason="exact_preview", apply=False)
+        preview_plan = preview["plans"][selected.value]
+        check(
+            preview["status"] == "preview" and preview["changed"] is True,
+            "A selected target with extras produces a changed exact preview",
+        )
+        check(
+            preview_plan["added"] == ["input_boolean.locked_required"],
+            "The exact preview restores locked required exposure last",
+        )
+        check(
+            preview_plan["removed"] == sorted(expected_removed),
+            "Every target-only or excluded exposure appears in the removal plan",
+        )
+        check(
+            set(preview["plans"]) == {selected.value},
+            "The preview contains no unselected target plan",
+        )
+        check(
+            all(platform is selected for _, platform in touched),
+            "Preview reads and validates only the selected target",
+        )
+
+        touched.clear()
+        synced = await manager.async_reconcile(reason="exact_apply", apply=True)
+        check(
+            len(applied_plans) == 1
+            and applied_plans[0].desired == desired
+            and applied_plans[0].removed == expected_removed,
+            "Apply receives the complete selected-target exact removal plan",
+        )
+        check(
+            actual[selected] == desired,
+            "The selected target converges to source minus exclude plus include",
+        )
+        check(
+            actual[const.TargetPlatform.HOMEKIT]
+            == frozenset({"light.homekit_untouched"})
+            and actual[const.TargetPlatform.MATTER]
+            == frozenset({"light.matter_untouched"}),
+            "Unselected targets remain unchanged",
+        )
+        check(
+            all(platform is selected for _, platform in touched),
+            "Read, validate, prepare, apply, and readback touch only the selected target",
+        )
+        synced_plan = synced["plans"][selected.value]
+        check(
+            synced["status"] == "synced"
+            and set(synced["plans"]) == {selected.value}
+            and synced_plan["missing"] == []
+            and synced_plan["extra"] == [],
+            "Post-apply readback proves exact convergence for the selected target",
+        )
+    finally:
+        (
+            manager_module.async_read_source,
+            manager_module.async_read_target,
+            manager_module.async_validate_target,
+            manager_module.async_google_room_updates,
+            manager_module.async_prepare_target,
+            manager_module.async_apply_plan,
+            manager_module.async_restore_target,
+        ) = original_functions
+    return 10
+
+
 async def check_manager_transaction() -> int:
     """Verify deterministic prepare/apply/rollback and post-apply readback."""
     platforms = list(const.TargetPlatform)
@@ -2544,7 +2736,11 @@ async def check_manager_transaction() -> int:
         )
 
     failure_steps: list[str] = []
-    failure_actual = {platform: frozenset() for platform in platforms}
+    failure_original = {
+        platform: frozenset({f"light.preexisting_{platform.value}"})
+        for platform in platforms
+    }
+    failure_actual = dict(failure_original)
 
     async def read_failure(
         _hass: Any, _config: Any, platform: Any
@@ -2553,7 +2749,7 @@ async def check_manager_transaction() -> int:
 
     async def prepare_failure(_hass: Any, _config: Any, platform: Any) -> Any:
         failure_steps.append(f"prepare:{platform.value}")
-        return SimpleNamespace(platform=platform)
+        return SimpleNamespace(platform=platform, entities=failure_actual[platform])
 
     async def apply_failure(
         _hass: Any, _config: Any, plan: Any, _rooms: Any
@@ -2567,7 +2763,7 @@ async def check_manager_transaction() -> int:
 
     async def restore_failure(_hass: Any, _config: Any, backup: Any) -> None:
         failure_steps.append(f"rollback:{backup.platform.value}")
-        failure_actual[backup.platform] = frozenset()
+        failure_actual[backup.platform] = backup.entities
 
     manager_module.async_read_target = read_failure
     manager_module.async_prepare_target = prepare_failure
@@ -2608,9 +2804,8 @@ async def check_manager_transaction() -> int:
         "Failure must reverse-roll back every attempted target, including the failing one",
     )
     check(
-        failure_actual
-        == {platform: frozenset() for platform in platforms},
-        "Reverse rollback restores every attempted target to its pre-change set",
+        failure_actual == failure_original,
+        "Reverse rollback restores target-only exposures removed earlier in the transaction",
     )
     check(failure_manager.state.status == "error", "Failed transaction state")
     return 10
@@ -3112,6 +3307,7 @@ async def main() -> None:
     assertions += await check_background_readiness_retry()
     assertions += await check_config_entry_background_task_ownership()
     assertions += await check_permanent_error_retry_stop()
+    assertions += await check_selected_target_exact_reconciliation()
     assertions += await check_manager_transaction()
     assertions += await check_noop_single_read_validation()
     assertions += await check_cancelled_transaction_rollback()
