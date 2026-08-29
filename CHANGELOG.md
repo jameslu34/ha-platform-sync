@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-29
+
+### Changed
+
+- Changed the license for version 0.6.1 and later from MIT to the PolyForm
+  Noncommercial License 1.0.0. The source may be inspected, modified, and
+  redistributed for permitted noncommercial purposes; commercial use is not
+  licensed.
+- Documented HACS installation through Custom repositories and retained
+  Home Assistant hassfest validation. The noncommercial license is not eligible
+  for the OSI-license check required by the default HACS catalog.
+
 ## [0.6.0] - 2026-08-29
 
 ### Added
@@ -27,5 +39,6 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - HACS-compatible repository structure, public documentation, and automated
   validation.
 
-[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jameslu34/ha-platform-sync/releases/tag/v0.6.0

@@ -341,7 +341,7 @@ def main() -> None:
 
     manifest = load_json(COMPONENT / "manifest.json")
     assert manifest["name"] == "Cross-Platform Device Sync"
-    assert manifest["version"] == "0.6.0"
+    assert manifest["version"] == "0.6.1"
 
     config_source = (COMPONENT / "config_flow.py").read_text(encoding="utf-8")
     ast.parse(config_source)

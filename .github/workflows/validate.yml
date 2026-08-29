@@ -10,15 +10,6 @@ on:
 permissions: {}
 
 jobs:
-  hacs:
-    name: HACS
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate HACS repository
-        uses: hacs/action@main
-        with:
-          category: integration
-
   hassfest:
     name: Home Assistant hassfest
     runs-on: ubuntu-latest

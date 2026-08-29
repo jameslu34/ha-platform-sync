@@ -1,8 +1,8 @@
 # Cross-Platform Device Sync for Home Assistant
 
 [![GitHub release](https://img.shields.io/github/v/release/jameslu34/ha-platform-sync)](https://github.com/jameslu34/ha-platform-sync/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![HACS validation](https://github.com/jameslu34/ha-platform-sync/actions/workflows/validate.yml/badge.svg)](https://github.com/jameslu34/ha-platform-sync/actions/workflows/validate.yml)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
+[![Home Assistant validation](https://github.com/jameslu34/ha-platform-sync/actions/workflows/validate.yml/badge.svg)](https://github.com/jameslu34/ha-platform-sync/actions/workflows/validate.yml)
 
 Cross-Platform Device Sync is a Home Assistant custom integration that keeps an
 exact, user-selected entity set synchronized across Google Home, HomeKit, and
@@ -67,8 +67,10 @@ target.
 
 [![Open your Home Assistant instance and add this repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=jameslu34&repository=ha-platform-sync&category=integration)
 
-This repository is HACS-compatible as a custom repository. Until it is included
-in the default HACS catalog, add it once as a custom repository:
+This repository is HACS-compatible as a custom repository. The current
+[HACS default-catalog validation](https://github.com/hacs/integration/blob/main/custom_components/hacs/validate/license.py)
+requires an OSI-approved license, so this project is intentionally distributed
+as a custom repository:
 
 1. Install and configure [HACS](https://www.hacs.xyz/) if it is not already
    available.
@@ -178,9 +180,16 @@ python tests/validate_translations.py
 python -m compileall custom_components/platform_sync tests
 ```
 
-GitHub Actions also validates the repository with HACS and Home Assistant
-hassfest.
+GitHub Actions runs the acceptance simulations and Home Assistant hassfest
+validation.
 
 ## License
 
-Released under the [MIT License](LICENSE).
+Version 0.6.1 and later are source-available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). You may inspect, use, modify,
+and redistribute the software and modified versions for permitted
+noncommercial purposes. Commercial use is not licensed.
+
+This is a noncommercial source-available license, not an OSI-approved open
+source license. Versions released before 0.6.1 remain under the license that
+accompanied those versions.

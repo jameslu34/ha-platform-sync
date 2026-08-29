@@ -933,9 +933,9 @@ def check_google_room_schema() -> int:
 
 
 async def check_single_switch_runtime() -> int:
-    """Version 0.6.0 has one enable switch and no sensor/button platforms."""
+    """Version 0.6.1 has one enable switch and no sensor/button platforms."""
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
-    check(manifest["version"] == "0.6.0", "Manifest version is 0.6.0")
+    check(manifest["version"] == "0.6.1", "Manifest version is 0.6.1")
     check(const.DEFAULT_ENABLED is False, "New installations default disabled")
     check(const.PLATFORMS == (), "Version 0.4 exposes no sensor/button platforms")
     check(

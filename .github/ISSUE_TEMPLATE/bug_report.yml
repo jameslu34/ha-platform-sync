@@ -25,7 +25,7 @@ body:
     id: integration-version
     attributes:
       label: Integration version
-      placeholder: 0.6.0
+      placeholder: 0.6.1
     validations:
       required: true
   - type: input

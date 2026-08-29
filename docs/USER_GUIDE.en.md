@@ -1,6 +1,6 @@
 # Cross-Platform Device Sync: Complete User Guide
 
-> Applies to version: 0.6.0
+> Applies to version: 0.6.1
 > English name: Cross-Platform Device Sync
 > Traditional Chinese name: 裝置平台同步
 
@@ -128,6 +128,9 @@ Home Assistant administrator to complete this one-time setup.
 ## Install the integration
 
 ### Recommended: install with HACS
+
+The project uses a noncommercial source-available license, so install it as a
+HACS custom repository rather than looking for it in the default HACS catalog.
 
 1. Install and configure HACS if it is not already available.
 2. Open **Custom repositories**, enter `jameslu34/ha-platform-sync` in the
@@ -686,6 +689,17 @@ After setup:
 - Changes to the selected dashboard views trigger recalculation.
 - Nothing is rewritten when no difference is found.
 - Changes are synchronized and checked only when needed.
+
+## License
+
+Version 0.6.1 and later are source-available under the
+[PolyForm Noncommercial License 1.0.0](../LICENSE). You may inspect, use,
+modify, and share the original or modified source for permitted noncommercial
+purposes. Commercial use is not licensed. This is a noncommercial
+source-available license, not an OSI-approved open source license.
+
+Versions released before 0.6.1 remain under the license included with those
+versions.
 
 ---
 

@@ -62,15 +62,17 @@ A pull request should:
 - Preserve the rule that the integration manages exposure only and never calls
   entity-control actions.
 - Update `CHANGELOG.md` under **Unreleased** for user-visible changes.
-- Pass the test, HACS validation, and hassfest workflows.
+- Pass the acceptance-test and Home Assistant hassfest workflows.
 
 ## Maintainer releases
 
 After `main` passes all workflows, open **Actions → Release → Run workflow** and
-enter a tag such as `v0.6.0`. The tag must exactly match the version in
+enter a tag such as `v0.6.1`. The tag must exactly match the version in
 `custom_components/platform_sync/manifest.json`. The workflow reruns the
 acceptance checks, creates the tag, and publishes the GitHub release. Pushing a
 matching `v*.*.*` tag remains supported for command-line release workflows.
 
-By submitting a contribution, you agree that it is licensed under the project's
-MIT License.
+By submitting a contribution, you confirm that you have the right to submit it
+and agree that it is licensed under the project's
+[PolyForm Noncommercial License 1.0.0](LICENSE). This permits noncommercial use,
+modification, and redistribution, but does not grant commercial-use rights.
