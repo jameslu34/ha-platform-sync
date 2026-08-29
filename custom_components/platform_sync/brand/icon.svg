@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">Cross-Platform Device Sync</title>
+  <desc id="description">Three smart-home devices connected to a central hub by circular synchronization arrows.</desc>
+  <defs>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#29b6ff"/>
+      <stop offset="1" stop-color="#0759e6"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#25e2c0"/>
+      <stop offset="1" stop-color="#00979f"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd83d"/>
+      <stop offset="1" stop-color="#f28a00"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dceaff"/>
+    </linearGradient>
+    <radialGradient id="hub" cx="35%" cy="28%" r="80%">
+      <stop offset="0" stop-color="#23dfc2"/>
+      <stop offset="0.58" stop-color="#079dcb"/>
+      <stop offset="1" stop-color="#0759e6"/>
+    </radialGradient>
+    <radialGradient id="lamp" cx="38%" cy="30%" r="68%">
+      <stop offset="0" stop-color="#fffbd3"/>
+      <stop offset="0.52" stop-color="#ffe13d"/>
+      <stop offset="1" stop-color="#f4a500"/>
+    </radialGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="8" stdDeviation="7" flood-color="#003b78" flood-opacity="0.24"/>
+    </filter>
+    <filter id="soft-shadow" x="-40%" y="-40%" width="180%" height="190%">
+      <feDropShadow dx="0" dy="5" stdDeviation="4" flood-color="#003b78" flood-opacity="0.22"/>
+    </filter>
+    <marker id="arrow-teal" viewBox="0 0 54 54" markerWidth="54" markerHeight="54" refX="48" refY="27" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 2 52 27 2 52 14 27Z" fill="#16c9ae"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 54 54" markerWidth="54" markerHeight="54" refX="48" refY="27" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 2 52 27 2 52 14 27Z" fill="#168bf2"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 54 54" markerWidth="54" markerHeight="54" refX="48" refY="27" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 2 52 27 2 52 14 27Z" fill="#f6a600"/>
+    </marker>
+  </defs>
+
+  <!-- Circular synchronization flow -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M118 315C72 236 99 139 180 96" stroke="#008c94" stroke-width="36" opacity="0.22"/>
+    <path d="M118 307C80 235 105 151 177 110" stroke="url(#teal)" stroke-width="25" marker-end="url(#arrow-teal)"/>
+    <path d="M330 104C408 140 435 232 394 306" stroke="#0759e6" stroke-width="36" opacity="0.2"/>
+    <path d="M335 111C404 147 425 229 392 295" stroke="url(#blue)" stroke-width="25" marker-end="url(#arrow-blue)"/>
+    <path d="M375 439C307 491 205 491 137 442" stroke="#d87400" stroke-width="36" opacity="0.22"/>
+    <path d="M368 432C305 478 209 478 147 436" stroke="url(#amber)" stroke-width="25" marker-end="url(#arrow-amber)"/>
+  </g>
+
+  <!-- Device-to-hub links -->
+  <g fill="none" stroke="url(#panel)" stroke-width="20" stroke-linecap="round" filter="url(#soft-shadow)">
+    <path d="M256 153V210"/>
+    <path d="M168 348 213 301"/>
+    <path d="M344 348 299 301"/>
+  </g>
+
+  <!-- Top smart speaker / thermostat -->
+  <g filter="url(#shadow)">
+    <rect x="181" y="25" width="150" height="137" rx="38" fill="url(#blue)" stroke="#064fc5" stroke-width="5"/>
+    <path d="M202 47C224 31 286 30 310 49" fill="none" stroke="#73d5ff" stroke-width="7" stroke-linecap="round" opacity="0.58"/>
+    <ellipse cx="256" cy="91" rx="53" ry="35" fill="url(#panel)"/>
+    <ellipse cx="256" cy="91" rx="22" ry="14" fill="#ffffff" stroke="#0b8fe9" stroke-width="8"/>
+    <rect x="242" y="132" width="28" height="8" rx="4" fill="#dff2ff" opacity="0.95"/>
+  </g>
+
+  <!-- Left smart plug -->
+  <g filter="url(#shadow)">
+    <rect x="30" y="309" width="166" height="153" rx="40" fill="url(#teal)" stroke="#00868d" stroke-width="5"/>
+    <path d="M49 332C72 314 148 314 176 337" fill="none" stroke="#83ffe6" stroke-width="7" stroke-linecap="round" opacity="0.55"/>
+    <rect x="67" y="342" width="92" height="91" rx="25" fill="url(#panel)" stroke="#c7e2ff" stroke-width="6"/>
+    <rect x="92" y="365" width="12" height="32" rx="6" fill="#056b78"/>
+    <rect x="122" y="365" width="12" height="32" rx="6" fill="#056b78"/>
+    <circle cx="113" cy="414" r="9" fill="#1cd8ae" stroke="#ffffff" stroke-width="4"/>
+  </g>
+
+  <!-- Right smart light -->
+  <g filter="url(#shadow)">
+    <rect x="316" y="309" width="166" height="153" rx="40" fill="url(#amber)" stroke="#e88200" stroke-width="5"/>
+    <path d="M338 332C366 313 439 315 463 340" fill="none" stroke="#fff29b" stroke-width="7" stroke-linecap="round" opacity="0.6"/>
+    <circle cx="399" cy="372" r="42" fill="url(#lamp)" stroke="#fff5b5" stroke-width="6"/>
+    <path d="M374 396C379 405 382 411 383 420H415C416 411 420 404 424 396Z" fill="url(#panel)"/>
+    <rect x="384" y="418" width="30" height="9" rx="4" fill="#bed4ef"/>
+    <rect x="388" y="428" width="22" height="8" rx="4" fill="#8eafd6"/>
+    <path d="M391 437H407C404 444 395 444 391 437Z" fill="#6d92c2"/>
+    <ellipse cx="387" cy="355" rx="9" ry="14" fill="#ffffff" opacity="0.76" transform="rotate(35 387 355)"/>
+  </g>
+
+  <!-- Central platform hub -->
+  <g filter="url(#shadow)">
+    <circle cx="256" cy="272" r="68" fill="#f7fbff" stroke="#bdd9f5" stroke-width="6"/>
+    <circle cx="256" cy="272" r="49" fill="url(#hub)"/>
+    <g fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M256 245V272M256 272 230 289M256 272 282 289"/>
+    </g>
+    <g fill="#ffffff">
+      <circle cx="256" cy="238" r="12"/>
+      <circle cx="256" cy="272" r="11"/>
+      <circle cx="225" cy="292" r="12"/>
+      <circle cx="287" cy="292" r="12"/>
+    </g>
+    <path d="M226 237C239 217 275 216 290 238" fill="none" stroke="#77f2e0" stroke-width="5" stroke-linecap="round" opacity="0.45"/>
+  </g>
+</svg>
