@@ -4,6 +4,10 @@
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
 [![Home Assistant validation](https://github.com/jameslu34/ha-platform-sync/actions/workflows/validate.yml/badge.svg)](https://github.com/jameslu34/ha-platform-sync/actions/workflows/validate.yml)
 
+<p align="center">
+  <img src="custom_components/platform_sync/brand/icon.svg" width="160" alt="Cross-Platform Device Sync icon">
+</p>
+
 Cross-Platform Device Sync is a Home Assistant custom integration that keeps an
 exact, user-selected entity set synchronized across Google Home, HomeKit, and
 Matterbridge.
@@ -13,8 +17,19 @@ manually, or use the current Home Assistant-side exposure list of a supported
 platform. Add per-platform exceptions, then let the integration reconcile only
 when the source set changes.
 
+> **What it does not synchronize:** this is not a Home Assistant backup,
+> failover, clustering, migration, or instance-to-instance replication tool.
+> It does not copy automations, history, settings, entity states, or an entire
+> Home Assistant system. It only manages which Home Assistant entities are
+> included in the selected platforms' Home Assistant-side exposure lists.
+
 > This is an independent community project. It is not affiliated with, endorsed
 > by, or supported by Home Assistant, Nabu Casa, Google, Apple, or Matterbridge.
+
+[![Open your Home Assistant instance and add this repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=jameslu34&repository=ha-platform-sync&category=integration)
+
+Install through the button above, or add `jameslu34/ha-platform-sync` as a HACS
+custom repository with the **Integration** category.
 
 ## Documentation
 
@@ -57,6 +72,19 @@ cameras, or media playback.
   - HomeKit: one or more Home Assistant HomeKit Bridge or Accessory entries
   - Matterbridge: Matterbridge with the `matterbridge-hass` plugin running and
     connected
+
+### Tested compatibility
+
+The current release has been live-validated with this combination:
+
+| Component | Validated version |
+|---|---:|
+| Home Assistant Core | 2026.8.3 |
+| Matterbridge | 3.10.7 |
+| `matterbridge-hass` | 1.5.0 |
+
+These are tested versions, not declared minimum versions. Other versions may
+work, but should be validated with a backup and `platform_sync.preview` first.
 
 Google Home targets additionally require `expose_by_default: false`, a dedicated
 Google Assistant `entity_config` include file, and the
