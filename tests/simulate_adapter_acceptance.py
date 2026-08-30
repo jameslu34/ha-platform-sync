@@ -155,6 +155,9 @@ diagnostics_module = load(
 )
 
 
+_DEFAULT_HOMEKIT_RUNTIME = object()
+
+
 class FakeEntry:
     """Small mutable stand-in for a Home Assistant ConfigEntry."""
 
@@ -167,6 +170,8 @@ class FakeEntry:
         state: str = "loaded",
         domain: str = "homekit",
         title: str | None = None,
+        source: str | None = None,
+        runtime_data: Any = _DEFAULT_HOMEKIT_RUNTIME,
     ) -> None:
         self.entry_id = entry_id
         self.options = deepcopy(options or {})
@@ -174,6 +179,12 @@ class FakeEntry:
         self.state = state
         self.domain = domain
         self.title = title or entry_id
+        self.source = source
+        self.runtime_data = (
+            SimpleNamespace(homekit=SimpleNamespace(status=1))
+            if runtime_data is _DEFAULT_HOMEKIT_RUNTIME
+            else runtime_data
+        )
 
 
 class FakeConfigEntries:
@@ -318,6 +329,181 @@ async def check_homekit_adapter() -> int:
         and hass.config_entries.reloaded == ["main", "accessory"],
         "Only managed HomeKit entries must be updated and reloaded",
     )
+    await targets._apply_homekit(
+        hass,
+        config,
+        frozenset({"light.one", "sensor.new", "lock.front"}),
+    )
+    check(
+        hass.config_entries.updated == ["accessory", "main"]
+        and hass.config_entries.reloaded == ["main", "accessory"],
+        "A no-op HomeKit plan does not update or reload any Config Entry",
+    )
+
+    runtime_entry = FakeEntry(
+        "runtime-main",
+        options={
+            "filter": {"include_entities": ["light.runtime"]},
+            "mode": "bridge",
+        },
+        runtime_data=SimpleNamespace(homekit=SimpleNamespace(status=3)),
+    )
+    runtime_hass = FakeHass([runtime_entry])
+    runtime_config = SimpleNamespace(
+        homekit_managed_entry_ids=("runtime-main",)
+    )
+    try:
+        await targets.async_validate_target(
+            runtime_hass,
+            runtime_config,
+            const.TargetPlatform.HOMEKIT,
+            frozenset({"light.runtime"}),
+        )
+    except RuntimeError:
+        check(True, "HomeKit loaded-but-waiting runtime is not accepted as ready")
+    else:
+        raise AssertionError("HomeKit WAIT runtime must fail closed")
+    runtime_entry.runtime_data.homekit.status = 1
+    runtime = await targets.async_validate_target(
+        runtime_hass,
+        runtime_config,
+        const.TargetPlatform.HOMEKIT,
+        frozenset({"light.runtime"}),
+    )
+    check(
+        runtime["runtime_verified_entries"] == 1,
+        "HomeKit RUNNING runtime is independently verified when supported",
+    )
+    runtime_entry.runtime_data = None
+    try:
+        await targets.async_validate_target(
+            runtime_hass,
+            runtime_config,
+            const.TargetPlatform.HOMEKIT,
+            frozenset({"light.runtime"}),
+        )
+    except RuntimeError:
+        check(True, "HomeKit with unreadable runtime status fails closed")
+    else:
+        raise AssertionError("Unknown HomeKit runtime must not be accepted as ready")
+
+    native_entry = FakeEntry(
+        "native-main",
+        options={
+            "filter": {"include_entities": ["light.old"]},
+            "mode": "bridge",
+        },
+        source="user",
+        runtime_data=SimpleNamespace(homekit=SimpleNamespace(status=1)),
+    )
+    native_hass = FakeHass([native_entry])
+
+    def native_update(entry: FakeEntry, *, options: dict[str, Any]) -> None:
+        entry.options = deepcopy(options)
+        native_hass.config_entries.updated.append(entry.entry_id)
+        # Simulate HomeKit's built-in Config Entry update listener completing
+        # its one native reload with a fresh runtime object.
+        entry.runtime_data = SimpleNamespace(
+            homekit=SimpleNamespace(status=1)
+        )
+
+    native_hass.config_entries.async_update_entry = native_update
+    await targets._apply_homekit(
+        native_hass,
+        SimpleNamespace(homekit_managed_entry_ids=("native-main",)),
+        frozenset({"light.new"}),
+    )
+    check(
+        native_hass.config_entries.updated == ["native-main"]
+        and native_hass.config_entries.reloaded == [],
+        "HomeKit UI entries rely on their native update listener without a duplicate reload",
+    )
+
+    imported_entry = FakeEntry(
+        "import-main",
+        options={
+            "filter": {
+                "include_entities": ["light.imported"],
+                "include_domains": [],
+                "include_entity_globs": [],
+                "exclude_entities": [],
+                "exclude_domains": [],
+                "exclude_entity_globs": [],
+            },
+            "mode": "bridge",
+        },
+        source="import",
+    )
+    imported_hass = FakeHass([imported_entry])
+    imported_original = deepcopy(imported_entry.options)
+    try:
+        await targets._apply_homekit(
+            imported_hass,
+            SimpleNamespace(homekit_managed_entry_ids=("import-main",)),
+            frozenset({"light.changed"}),
+        )
+    except RuntimeError as error:
+        check(
+            "YAML-managed" in str(error),
+            "Changed YAML/import HomeKit targets fail with a durable-ownership reason",
+        )
+    else:
+        raise AssertionError("Changed YAML/import HomeKit target must fail closed")
+    check(
+        imported_entry.options == imported_original
+        and imported_hass.config_entries.updated == []
+        and imported_hass.config_entries.reloaded == [],
+        "YAML/import preflight rejects the whole change before any mutation",
+    )
+    await targets._apply_homekit(
+        imported_hass,
+        SimpleNamespace(homekit_managed_entry_ids=("import-main",)),
+        frozenset({"light.imported"}),
+    )
+    check(
+        imported_entry.options == imported_original,
+        "An unchanged YAML/import HomeKit target remains readable without mutation",
+    )
+    try:
+        targets.validate_target_configuration(
+            imported_hass,
+            SimpleNamespace(homekit_managed_entry_ids=("import-main",)),
+            const.TargetPlatform.HOMEKIT,
+        )
+    except RuntimeError:
+        check(True, "Config Flow structural validation rejects imported writable targets")
+    else:
+        raise AssertionError("An imported HomeKit entry must not be offered as writable")
+
+    settle_entries = [
+        FakeEntry("reload-fails", source="import"),
+        FakeEntry("reload-finishes", source="import"),
+    ]
+    settle_hass = FakeHass(settle_entries)
+    sibling_finished = False
+
+    async def partially_failing_reload(entry_id: str) -> bool:
+        nonlocal sibling_finished
+        if entry_id == "reload-fails":
+            return False
+        await asyncio.sleep(0.01)
+        sibling_finished = True
+        return True
+
+    settle_hass.config_entries.async_reload = partially_failing_reload
+    try:
+        await targets._reload_homekit_entries(
+            settle_hass,
+            settle_entries,
+            previous_runtime={entry.entry_id: entry.runtime_data for entry in settle_entries},
+        )
+    except RuntimeError:
+        check(
+            sibling_finished,
+            "HomeKit reload failure waits for bounded siblings before rollback can begin",
+        )
+    else:
+        raise AssertionError("A failed HomeKit reload must propagate after siblings settle")
 
     fail_closed_hass = FakeHass([main])
     empty_managed_config = SimpleNamespace(homekit_managed_entry_ids=())
@@ -417,6 +603,23 @@ async def check_homekit_adapter() -> int:
         check(True, "An unloaded selected HomeKit source entry fails closed")
     else:
         raise AssertionError("An unloaded selected HomeKit source entry must fail closed")
+    structurally_valid = await targets.async_validate_homekit_source_entries(
+        FakeHass([unavailable]), ("unavailable",)
+    )
+    check(
+        structurally_valid == frozenset({"light.unavailable"}),
+        "HomeKit source selection accepts a structurally valid transiently unloaded entry",
+    )
+    unavailable.disabled_by = "user"
+    try:
+        await targets.async_validate_homekit_source_entries(
+            FakeHass([unavailable]), ("unavailable",)
+        )
+    except targets.HomeKitSourceEntryUnavailableError:
+        check(True, "A disabled HomeKit source is rejected before configuration save")
+    else:
+        raise AssertionError("A disabled HomeKit source must fail structural validation")
+    unavailable.disabled_by = None
 
     competing = FakeEntry(
         "competing",
@@ -608,7 +811,7 @@ async def check_homekit_adapter() -> int:
             raise AssertionError(
                 "Malformed managed HomeKit target filters must never look exact"
             )
-    return 38
+    return 50
 
 
 def check_matter_runtime() -> int:
@@ -1021,6 +1224,7 @@ async def check_matter_apply_process_fallback() -> int:
         == [
             "plugins",
             "savepluginconfig",
+            "plugins",
             "restartplugin",
             "wait-1",
             "snapshot",
@@ -1036,6 +1240,7 @@ async def check_matter_apply_process_fallback() -> int:
         == [
             "plugins",
             "savepluginconfig",
+            "plugins",
             "restartplugin",
             "wait-1",
             "snapshot",
@@ -1403,6 +1608,148 @@ async def check_matter_request_overall_timeout() -> int:
     return 3
 
 
+def check_matter_endpoint_compatibility() -> int:
+    """Matterbridge accepts legacy hosts and secure reverse-proxy URLs."""
+    check(
+        targets._matter_ws_url(
+            SimpleNamespace(matter_host="192.0.2.81", matter_port=8283)
+        )
+        == "ws://192.0.2.81:8283/",
+        "legacy Matterbridge host and port remain compatible",
+    )
+    check(
+        targets._matter_ws_url(
+            SimpleNamespace(
+                matter_host="https://matter.example.test/admin/ws?site=home",
+                matter_port=8283,
+            )
+        )
+        == "wss://matter.example.test:443/admin/ws?site=home",
+        "HTTPS reverse-proxy endpoints retain their path and use WSS",
+    )
+    check(
+        targets._matter_ws_url(
+            SimpleNamespace(matter_host="2001:db8::81", matter_port=8283)
+        )
+        == "ws://[2001:db8::81]:8283/",
+        "IPv6 Matterbridge hosts are bracketed correctly",
+    )
+    check(
+        targets._matter_ws_url(
+            SimpleNamespace(
+                matter_host="wss://matter.example.test/ws",
+                matter_port=8283,
+                matter_password="test-token",
+            )
+        )
+        == "wss://matter.example.test:443/ws?password=test-token",
+        "optional Matterbridge frontend authentication is encoded in the WebSocket query",
+    )
+    try:
+        targets._matter_ws_url(
+            SimpleNamespace(
+                matter_host="wss://user:secret@matter.example.test/ws",
+                matter_port=8283,
+            )
+        )
+    except RuntimeError as error:
+        check(
+            "secret" not in str(error),
+            "Matterbridge URL credential rejection never echoes credentials",
+        )
+    else:
+        raise AssertionError("Credentials embedded in Matterbridge URLs must fail")
+    return 5
+
+
+async def check_matter_save_barrier_and_uncertain_restart() -> int:
+    """Save readback strictly precedes one restart, even after a timeout."""
+    expected = frozenset({"light.one"})
+    old_plugin = matter_snapshot(
+        config_updates={"whiteList": ["light.old"]}
+    ).plugin
+    new_plugin = matter_snapshot().plugin
+    plugin_reads = 0
+    calls: list[str] = []
+
+    async def request(_config: Any, command: str, payload: Any = None) -> Any:
+        nonlocal plugin_reads
+        calls.append(command)
+        if command == "plugins":
+            plugin_reads += 1
+            return [old_plugin if plugin_reads < 3 else new_plugin]
+        raise AssertionError(f"Unexpected Matterbridge command: {command}")
+
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    original_request = targets._matter_request
+    original_sleep = targets.asyncio.sleep
+    targets._matter_request = request
+    targets.asyncio.sleep = no_delay
+    try:
+        await targets._wait_matter_config_persisted(
+            SimpleNamespace(), expected, timeout=1
+        )
+    finally:
+        targets._matter_request = original_request
+        targets.asyncio.sleep = original_sleep
+    check(
+        calls == ["plugins", "plugins", "plugins"],
+        "Matterbridge save barrier polls until the new exact allowlist is readable",
+    )
+
+    restart_calls = 0
+    runtime_waits = 0
+
+    async def timeout_request(
+        _config: Any, command: str, payload: Any = None
+    ) -> Any:
+        nonlocal restart_calls
+        if command == "savepluginconfig":
+            return {}
+        if command == "restartplugin":
+            restart_calls += 1
+            raise targets.MatterbridgeCommandTimeoutError(
+                "Matterbridge restartplugin timed out"
+            )
+        raise AssertionError(f"Unexpected Matterbridge command: {command}")
+
+    async def persisted(_config: Any, entities: frozenset[str]) -> None:
+        check(entities == expected, "save barrier keeps the exact allowlist")
+
+    async def runtime(
+        _config: Any, entities: frozenset[str], timeout: float = 60
+    ) -> Any:
+        nonlocal runtime_waits
+        runtime_waits += 1
+        check(entities == expected, "uncertain restart polls the exact runtime")
+        return {"loaded": True}
+
+    plugin_config = deepcopy(new_plugin["configJson"])
+    originals = (
+        targets._matter_request,
+        targets._wait_matter_config_persisted,
+        targets._wait_matter_runtime,
+    )
+    targets._matter_request = timeout_request
+    targets._wait_matter_config_persisted = persisted
+    targets._wait_matter_runtime = runtime
+    try:
+        await targets._save_matter_config(SimpleNamespace(), plugin_config)
+    finally:
+        (
+            targets._matter_request,
+            targets._wait_matter_config_persisted,
+            targets._wait_matter_runtime,
+        ) = originals
+    check(
+        restart_calls == 1 and runtime_waits == 1,
+        "a timed-out restart is never resent and converges by readback only",
+    )
+    return 3
+
+
 async def check_matter_backup_completion_handshake() -> int:
     """Backup readiness requires its request ack and matching archive event."""
     orders = [
@@ -1603,9 +1950,9 @@ def check_google_room_schema() -> int:
 
 
 async def check_single_switch_runtime() -> int:
-    """Version 0.6.2 has one enable switch and no sensor/button platforms."""
+    """Version 0.6.3 has one enable switch and no sensor/button platforms."""
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
-    check(manifest["version"] == "0.6.2", "Manifest version is 0.6.2")
+    check(manifest["version"] == "0.6.3", "Manifest version is 0.6.3")
     check(const.DEFAULT_ENABLED is False, "New installations default disabled")
     check(const.PLATFORMS == (), "Version 0.4 exposes no sensor/button platforms")
     check(
@@ -2347,7 +2694,9 @@ def check_internal_timing_config() -> int:
     minimum_rollback_budget = (
         targets.GOOGLE_SYNC_TIMEOUT
         + targets.HOMEKIT_RELOAD_TIMEOUT
-        + targets.MATTER_RUNTIME_TIMEOUT
+        + targets.MATTER_CONFIG_PERSIST_TIMEOUT
+        + targets.MATTER_PLUGIN_RESTART_TIMEOUT
+        + 2 * targets.MATTER_RUNTIME_TIMEOUT
         + 5 * targets.MATTER_REQUEST_TIMEOUT
         + manager_module.ROLLBACK_SAFETY_MARGIN_SECONDS
     )
@@ -2481,6 +2830,29 @@ async def check_source_watcher_policy() -> int:
                 )
             await manager.async_stop()
 
+        intervals.clear()
+        dispatcher_signals.clear()
+        target_hass = WatcherHass()
+        target_manager = manager_module.PlatformSyncManager(
+            target_hass,
+            SimpleNamespace(
+                enabled=True,
+                source_kind=const.SourceKind.DASHBOARD,
+                targets=frozenset({const.TargetPlatform.HOMEKIT}),
+                homekit_source_entry_ids=(),
+                homekit_managed_entry_ids=("managed-entry",),
+            ),
+        )
+        await target_manager.async_start()
+        check(
+            target_hass.bus.events
+            == ["lovelace_updated", "entity_registry_updated"]
+            and dispatcher_signals == ["config_entry_changed"]
+            and intervals == [],
+            "Dashboard sources also watch explicitly managed HomeKit targets",
+        )
+        await target_manager.async_stop()
+
         signal = manager_module.config_entries.SIGNAL_CONFIG_ENTRY_CHANGED
         del manager_module.config_entries.SIGNAL_CONFIG_ENTRY_CHANGED
         intervals.clear()
@@ -2500,6 +2872,44 @@ async def check_source_watcher_policy() -> int:
             "HomeKit falls back to 15-second polling only when its signal is unavailable",
         )
         await manager.async_stop()
+
+        intervals.clear()
+        target_fallback_hass = WatcherHass()
+        target_fallback_manager = manager_module.PlatformSyncManager(
+            target_fallback_hass,
+            SimpleNamespace(
+                enabled=True,
+                source_kind=const.SourceKind.DASHBOARD,
+                targets=frozenset({const.TargetPlatform.HOMEKIT}),
+                homekit_source_entry_ids=(),
+                homekit_managed_entry_ids=("managed-entry",),
+            ),
+        )
+        await target_fallback_manager.async_start()
+        check(
+            intervals == [15],
+            "A HomeKit target also falls back to polling when config-entry signals are unavailable",
+        )
+        await target_fallback_manager.async_stop()
+
+        intervals.clear()
+        deduplicated_hass = WatcherHass()
+        deduplicated_manager = manager_module.PlatformSyncManager(
+            deduplicated_hass,
+            SimpleNamespace(
+                enabled=True,
+                source_kind=const.SourceKind.MATTER,
+                targets=frozenset({const.TargetPlatform.HOMEKIT}),
+                homekit_source_entry_ids=(),
+                homekit_managed_entry_ids=("managed-entry",),
+            ),
+        )
+        await deduplicated_manager.async_start()
+        check(
+            intervals == [15],
+            "Multiple fallback reasons share one 15-second polling subscription",
+        )
+        await deduplicated_manager.async_stop()
         manager_module.config_entries.SIGNAL_CONFIG_ENTRY_CHANGED = signal
 
         def failed_dispatcher(_hass: Any, _signal: Any, _callback: Any) -> Any:
@@ -2552,7 +2962,7 @@ async def check_source_watcher_policy() -> int:
             manager_module.config_entries.SIGNAL_CONFIG_ENTRY_CHANGED = (
                 "config_entry_changed"
             )
-    return 8
+    return 11
 
 
 async def check_homekit_event_trigger_and_queue() -> int:
@@ -2564,6 +2974,7 @@ async def check_homekit_event_trigger_and_queue() -> int:
         SimpleNamespace(
             enabled=True,
             homekit_source_entry_ids=("selected-source",),
+            homekit_managed_entry_ids=("selected-target",),
         ),
     )
     direct_manager.schedule = reasons.append
@@ -2578,6 +2989,10 @@ async def check_homekit_event_trigger_and_queue() -> int:
         )
     direct_manager._handle_homekit_config_entry_change(
         config_changes.UPDATED,
+        SimpleNamespace(domain="homekit", entry_id="selected-target"),
+    )
+    direct_manager._handle_homekit_config_entry_change(
+        config_changes.UPDATED,
         SimpleNamespace(domain="homekit", entry_id="not-selected"),
     )
     direct_manager._handle_homekit_config_entry_change(
@@ -2590,8 +3005,9 @@ async def check_homekit_event_trigger_and_queue() -> int:
             "homekit_config_entry_added",
             "homekit_config_entry_updated",
             "homekit_config_entry_removed",
+            "homekit_config_entry_updated",
         ],
-        "Only selected HomeKit source add, update, and remove changes schedule reconciliation",
+        "Selected HomeKit source and managed target changes schedule reconciliation",
     )
 
     class QueueHass:
@@ -2641,7 +3057,7 @@ async def check_homekit_event_trigger_and_queue() -> int:
         manager.state.startup_scan_completed == "2026-08-29T00:00:00+00:00",
         "A successful startup scan records a durable completion timestamp",
     )
-    return 5
+    return 6
 
 
 async def check_startup_race_and_safe_stop() -> int:
@@ -3060,6 +3476,110 @@ def check_source_events_preserve_fault_backoff() -> int:
     return 2
 
 
+async def check_matter_startup_recovery_grace() -> int:
+    """Normal Matterbridge warm-up never triggers an immediate restart."""
+    class StartupBus:
+        def __init__(self) -> None:
+            self.started_callback: Any = None
+
+        def async_listen_once(self, event: str, callback: Any) -> Any:
+            check(
+                event == "homeassistant_started",
+                "Matterbridge grace waits for Home Assistant's started event",
+            )
+            self.started_callback = callback
+            return lambda: None
+
+    startup_hass = SimpleNamespace(
+        state=manager_module.CoreState.starting,
+        bus=StartupBus(),
+    )
+    startup_manager = manager_module.PlatformSyncManager(
+        startup_hass,
+        SimpleNamespace(
+            enabled=True,
+            source_kind=const.SourceKind.MANUAL,
+            targets=frozenset(),
+        ),
+    )
+    startup_reasons: list[str] = []
+    startup_manager.schedule = startup_reasons.append
+    await startup_manager.async_start()
+    check(
+        startup_manager._started_at is None,
+        "Matterbridge startup grace does not begin while HA Core is still starting",
+    )
+    startup_hass.bus.started_callback(SimpleNamespace())
+    check(
+        startup_manager._started_at is not None
+        and startup_reasons == ["startup_scan"],
+        "Matterbridge startup grace begins exactly when the mandatory startup scan is scheduled",
+    )
+
+    expected = frozenset({"light.one"})
+    error = targets.MatterbridgeRuntimeError(
+        "plugin_not_started", expected, recoverable=True
+    )
+    manager = manager_module.PlatformSyncManager(
+        SimpleNamespace(), SimpleNamespace(enabled=True)
+    )
+    now = asyncio.get_running_loop().time()
+    manager._started_at = now
+    recovered: list[frozenset[str]] = []
+
+    async def recover(
+        _config: Any,
+        entities: frozenset[str],
+        *,
+        before_matter_process_restart: Any,
+    ) -> dict[str, Any]:
+        del before_matter_process_restart
+        recovered.append(entities)
+        return {"loaded": True}
+
+    original_recover = manager_module.async_recover_matter_runtime
+    manager_module.async_recover_matter_runtime = recover
+    try:
+        prestart_manager = manager_module.PlatformSyncManager(
+            SimpleNamespace(), SimpleNamespace(enabled=True)
+        )
+        prestart = await prestart_manager._async_attempt_matter_recovery(
+            error, background=True
+        )
+        check(
+            prestart is None and recovered == [],
+            "a fallback poll before HA_STARTED can never trigger Matterbridge recovery",
+        )
+        first = await manager._async_attempt_matter_recovery(
+            error, background=True
+        )
+        check(
+            first is None and recovered == [],
+            "the first startup observation performs no Matterbridge restart",
+        )
+        manager._started_at -= (
+            manager_module.MATTER_RECOVERY_STARTUP_GRACE_SECONDS + 1
+        )
+        assert manager._matter_failure_first_at is not None
+        manager._matter_failure_first_at -= (
+            manager_module.MATTER_RECOVERY_MIN_FAILURE_SECONDS + 1
+        )
+        second = await manager._async_attempt_matter_recovery(
+            error, background=True
+        )
+    finally:
+        manager_module.async_recover_matter_runtime = original_recover
+    check(
+        second == {"loaded": True} and recovered == [expected],
+        "persistent post-grace failure permits one guarded recovery",
+    )
+    check(
+        manager._matter_failure_count == 0,
+        "successful Matterbridge recovery clears the observation episode",
+    )
+    return 7
+
+
 async def check_matter_recovery_episode_and_cooldown() -> int:
     """Background recovery is once per episode and never more often than five minutes."""
     expected = frozenset({"light.one"})
@@ -3070,6 +3590,16 @@ async def check_matter_recovery_episode_and_cooldown() -> int:
         SimpleNamespace(), SimpleNamespace(enabled=True)
     )
     calls: list[frozenset[str]] = []
+
+    def make_recovery_eligible(instance: Any) -> None:
+        now = asyncio.get_running_loop().time()
+        instance._started_at = (
+            now - manager_module.MATTER_RECOVERY_STARTUP_GRACE_SECONDS - 1
+        )
+        instance._matter_failure_count = 1
+        instance._matter_failure_first_at = (
+            now - manager_module.MATTER_RECOVERY_MIN_FAILURE_SECONDS - 1
+        )
 
     async def recover(
         _config: Any,
@@ -3087,6 +3617,7 @@ async def check_matter_recovery_episode_and_cooldown() -> int:
     original_recover = manager_module.async_recover_matter_runtime
     manager_module.async_recover_matter_runtime = recover
     try:
+        make_recovery_eligible(manager)
         first = await manager._async_attempt_matter_recovery(
             recoverable, background=True
         )
@@ -3096,6 +3627,7 @@ async def check_matter_recovery_episode_and_cooldown() -> int:
         manager._matter_recovery_guard.last_attempt -= (
             manager_module.MATTER_RECOVERY_COOLDOWN_SECONDS + 1
         )
+        make_recovery_eligible(manager)
         third = await manager._async_attempt_matter_recovery(
             recoverable, background=True
         )
@@ -3138,6 +3670,7 @@ async def check_matter_recovery_episode_and_cooldown() -> int:
     failing = manager_module.PlatformSyncManager(
         SimpleNamespace(), SimpleNamespace(enabled=True)
     )
+    make_recovery_eligible(failing)
     failed_calls = 0
 
     async def fail_recovery(
@@ -4352,6 +4885,8 @@ async def main() -> None:
     assertions += await check_guarded_matter_runtime_recovery()
     assertions += await check_matter_source_runtime_validation()
     assertions += await check_matter_request_overall_timeout()
+    assertions += check_matter_endpoint_compatibility()
+    assertions += await check_matter_save_barrier_and_uncertain_restart()
     assertions += await check_matter_backup_completion_handshake()
     assertions += await check_matter_restart_is_fire_and_forget()
     assertions += check_google_room_schema()
@@ -4366,6 +4901,7 @@ async def main() -> None:
     assertions += await check_background_readiness_retry()
     assertions += await check_retry_backoff_resets_after_success()
     assertions += check_source_events_preserve_fault_backoff()
+    assertions += await check_matter_startup_recovery_grace()
     assertions += await check_matter_recovery_episode_and_cooldown()
     assertions += await check_matter_apply_restart_guard_across_reload()
     assertions += await check_config_entry_background_task_ownership()

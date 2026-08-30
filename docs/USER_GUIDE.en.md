@@ -1,6 +1,6 @@
 # Cross-Platform Device Sync: Complete User Guide
 
-> Applies to version: 0.6.2
+> Applies to version: 0.6.3
 > English name: Cross-Platform Device Sync
 > Traditional Chinese name: 裝置平台同步
 
@@ -122,7 +122,9 @@ Home Assistant administrator to complete this one-time setup.
 - Matterbridge must be running.
 - `matterbridge-hass` must be installed, enabled, and connected to Home
   Assistant.
-- Have the Matterbridge host name or IP address and management port available.
+- Have the Matterbridge host name/IP address, or a complete secure management
+  endpoint, and the management port available.
+- If Matterbridge frontend authentication is enabled, have its password ready.
 - The default management port is `8283`.
 
 ## Install the integration
@@ -312,8 +314,9 @@ integration permission to update that item.
 Choose this source when the existing Matterbridge device list should be the
 source of truth.
 
-Setup continues directly to target selection. Enter the Matterbridge host and
-port later on the **Configure selected platforms** page.
+Setup continues directly to target selection. Enter the Matterbridge host or
+complete endpoint, port, and optional frontend password later on the
+**Configure selected platforms** page.
 
 Keep in mind:
 
@@ -344,6 +347,10 @@ When HomeKit is selected, configure:
 
 Only the HomeKit Bridges or Accessories selected here may be updated. Selecting
 a HomeKit entry as a source does not automatically make it a writable target.
+For durable automatic updates, choose HomeKit entries created in the Home
+Assistant UI. A YAML-managed entry can still be used as a read-only HomeKit
+source, but cannot be selected as a writable target because Home Assistant
+would overwrite its changes from YAML after a restart.
 
 ### Matterbridge
 
@@ -351,6 +358,7 @@ When Matterbridge is selected, configure:
 
 - **Matterbridge host**
 - **Matterbridge port**
+- Optional **Matterbridge password**
 - Optional **Always include in Matterbridge**
 - Optional **Exclude from Matterbridge**
 
@@ -451,6 +459,10 @@ The integration uses HomeKit configuration change notifications whenever
 possible. If the installed Home Assistant version cannot provide those
 notifications, the integration checks periodically instead.
 
+Changes to an explicitly selected writable HomeKit target also wake an
+immediate recheck. A platform that is still starting does not block saving the
+completed settings; bounded background retries wait for it to converge.
+
 ### When Google Home or Matterbridge is the source
 
 The integration checks the device list about every 15 seconds. Synchronization
@@ -463,9 +475,10 @@ Matterbridge, `matterbridge-hass`, the exact device list, and the loaded devices
 are ready. For a narrowly defined runtime-only failure, the integration waits
 until a Matterbridge backup has actually finished, restarts the Home Assistant
 plugin first, and restarts the full Matterbridge process only when exact
-readback still fails. It performs this recovery at most once per failure
-episode and keeps a five-minute cooldown. Continued failures retry after 15,
-30, 60, 120, then 300 seconds.
+readback still fails. A three-minute startup grace prevents normal plugin
+warm-up from triggering a restart. It performs this recovery at most once per
+failure episode and keeps a five-minute cooldown. Continued failures retry
+after 15, 30, 60, 120, then 300 seconds.
 
 The integration does not restart Matterbridge when the management interface is
 unreachable, credentials are missing, the plugin is disabled, the exact list
@@ -504,6 +517,11 @@ You can change:
 - The Google Assistant configuration file
 - Writable HomeKit target entries
 - Matterbridge connection settings
+
+All saved settings are repopulated when you open **Configure** again. A
+validation error keeps the other values you just entered. If you deselect a
+target, its connection fields and additions/exclusions are hidden and inactive,
+but remain saved and reappear when that target is selected again.
 
 ## Preview or synchronize now
 
@@ -586,10 +604,11 @@ dashboard and page URL paths.
 - Confirm that the views contain at least one card with an entity.
 - Confirm that all selected views are readable.
 
-### A HomeKit source cannot be accepted
+### A HomeKit source cannot be accepted or synchronized
 
 - Confirm that you selected a Home Assistant HomeKit Bridge or Accessory.
-- Confirm that the HomeKit entry is loaded.
+- A temporarily unloaded entry can be saved, but synchronization waits until
+  the HomeKit runtime is loaded and verifiably running.
 - Confirm that it uses an explicit device list rather than a broad rule such as
   every device of a particular type.
 - Accessories paired directly in Apple Home are not part of this source list.
@@ -599,6 +618,11 @@ dashboard and page URL paths.
 Create and pair a HomeKit Bridge or Accessory in Home Assistant first, then
 return to this integration and select it. Cross-Platform Device Sync does not
 create an Apple Home pairing for you.
+
+If a target is YAML-managed, recreate that writable Bridge or Accessory through
+the Home Assistant UI, or maintain its exact entity list in HomeKit YAML
+yourself. The integration will not accept a writable target whose changes would
+disappear after restart.
 
 ### Google Home setup is not ready
 
@@ -614,8 +638,10 @@ Check that:
 
 Check that:
 
-- The host name or IP address is correct.
+- The host name, IP address, or full ws/wss/http/https endpoint is correct.
 - The management port is correct.
+- The optional frontend password is correct.
+- A WSS endpoint has a certificate trusted by Home Assistant.
 - Matterbridge is running.
 - `matterbridge-hass` is enabled and connected to Home Assistant.
 
@@ -695,7 +721,7 @@ to Google Home, HomeKit, and Matterbridge.
 5. Select Google Home, HomeKit, and Matterbridge as targets.
 6. Enter the Google Assistant device configuration file.
 7. Select the writable HomeKit target entries.
-8. Enter the Matterbridge host and port.
+8. Enter the Matterbridge endpoint, port, and optional password.
 9. Add per-platform additions or exclusions if needed.
 10. Review and submit the final page.
 

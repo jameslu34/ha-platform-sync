@@ -131,8 +131,10 @@ def install_stubs() -> dict[str, int]:
     helpers.selector = selector
     selector.SelectSelectorConfig = _SelectorConfig
     selector.EntitySelectorConfig = _SelectorConfig
+    selector.TextSelectorConfig = _SelectorConfig
     selector.SelectSelector = _Selector
     selector.EntitySelector = _Selector
+    selector.TextSelector = _Selector
     homeassistant.config_entries = config_entries
 
     sys.modules.update(
@@ -218,7 +220,7 @@ class _EmptyHomeKitSourceError(RuntimeError):
     pass
 
 
-async def _read_homekit_source_entries(_hass: Any, requested_entry_ids: Any):
+async def _validate_homekit_source_entries(_hass: Any, requested_entry_ids: Any):
     requested = tuple(dict.fromkeys(requested_entry_ids))
     available = {
         entry.entry_id: entry
@@ -229,8 +231,7 @@ async def _read_homekit_source_entries(_hass: Any, requested_entry_ids: Any):
     entities: set[str] = set()
     for entry_id in requested:
         entry = available[entry_id]
-        state = getattr(entry, "state", "")
-        if str(getattr(state, "value", state)).casefold() != "loaded":
+        if getattr(entry, "disabled_by", None) is not None:
             raise _HomeKitSourceEntryUnavailableError
         entity_filter = (entry.options or {}).get(
             "filter", (entry.data or {}).get("filter", {})
@@ -251,6 +252,40 @@ async def _read_homekit_source_entries(_hass: Any, requested_entry_ids: Any):
             raise _EmptyHomeKitSourceError
         entities.update(selected)
     return frozenset(entities)
+
+
+def _validate_target_configuration(_hass: Any, sync_config: Any, platform: Any):
+    if platform is const.TargetPlatform.HOMEKIT:
+        available = {
+            entry.entry_id: entry
+            for entry in _hass.config_entries.async_entries("homekit")
+        }
+        for entry_id in sync_config.homekit_managed_entry_ids:
+            entry = available[entry_id]
+            if getattr(entry, "disabled_by", None) is not None:
+                raise RuntimeError("disabled HomeKit target")
+            if str(getattr(entry, "source", "")).casefold() == "import":
+                raise RuntimeError("YAML/import HomeKit target")
+            entity_filter = (entry.options or {}).get("filter")
+            if (
+                not isinstance(entity_filter, dict)
+                or not entity_filter.get("include_entities")
+                or any(
+                    entity_filter.get(key)
+                    for key in (
+                        "include_domains",
+                        "include_entity_globs",
+                        "exclude_domains",
+                        "exclude_entities",
+                        "exclude_entity_globs",
+                    )
+                )
+            ):
+                raise RuntimeError("invalid HomeKit target filter")
+    elif platform is const.TargetPlatform.MATTER:
+        host = str(sync_config.matter_host).strip().casefold()
+        if not host or host.startswith(("ftp://", "file://")):
+            raise RuntimeError("invalid Matterbridge endpoint")
 
 
 async def _read_target(_hass: Any, _config: Any, _platform: Any):
@@ -275,7 +310,8 @@ targets_stub.HomeKitSourceEntryUnavailableError = (
 targets_stub.HomeKitSourceFilterUnsupportedError = (
     _HomeKitSourceFilterUnsupportedError
 )
-targets_stub.async_read_homekit_source_entries = _read_homekit_source_entries
+targets_stub.async_validate_homekit_source_entries = _validate_homekit_source_entries
+targets_stub.validate_target_configuration = _validate_target_configuration
 sys.modules["custom_components.platform_sync.targets"] = targets_stub
 
 flow_module = load("custom_components.platform_sync.config_flow", "config_flow.py")
@@ -377,6 +413,10 @@ def schema_marker(result: dict[str, Any], key: str) -> _Marker:
 def schema_value(result: dict[str, Any], key: str) -> Any:
     marker = schema_marker(result, key)
     return result["data_schema"].schema[marker]
+
+
+def schema_default(result: dict[str, Any], key: str) -> Any:
+    return deepcopy(schema_marker(result, key).default)
 
 
 ASSERTIONS = 0
@@ -652,11 +692,21 @@ async def check_homekit_source_selection() -> None:
         {const.CONF_HOMEKIT_SOURCE_ENTRY_IDS: ["homekit-main"]}
     )
     check(
-        result["errors"].get(const.CONF_HOMEKIT_SOURCE_ENTRY_IDS)
-        == "homekit_source_entry_unavailable",
-        "an unloaded HomeKit source entry fails closed",
+        result["step_id"] == "targets",
+        "a structurally valid but transiently unloaded HomeKit source can be saved",
     )
     hass.config_entries.homekit_entries[0].state = "loaded"
+
+    hass.config_entries.homekit_entries[0].disabled_by = "user"
+    result = await flow.async_step_homekit_source(
+        {const.CONF_HOMEKIT_SOURCE_ENTRY_IDS: ["homekit-main"]}
+    )
+    check(
+        result["errors"].get(const.CONF_HOMEKIT_SOURCE_ENTRY_IDS)
+        == "homekit_source_entry_unavailable",
+        "a disabled HomeKit source entry is rejected as a permanent selection error",
+    )
+    del hass.config_entries.homekit_entries[0].disabled_by
 
     main_filter = hass.config_entries.homekit_entries[0].options["filter"]
     main_filter["exclude_entities"] = ["light.platform_source"]
@@ -681,23 +731,33 @@ async def check_homekit_source_selection() -> None:
     )
     main_filter["include_entities"] = ["light.platform_source"]
 
-    original_reader = flow_module.async_read_homekit_source_entries
+    original_reader = flow_module.async_validate_homekit_source_entries
 
     async def unexpected_failure(_hass: Any, _entry_ids: Any):
         raise RuntimeError("simulated unexpected read failure")
 
-    flow_module.async_read_homekit_source_entries = unexpected_failure
+    flow_module.async_validate_homekit_source_entries = unexpected_failure
     try:
         result = await flow.async_step_homekit_source(
             {const.CONF_HOMEKIT_SOURCE_ENTRY_IDS: ["homekit-main"]}
         )
     finally:
-        flow_module.async_read_homekit_source_entries = original_reader
+        flow_module.async_validate_homekit_source_entries = original_reader
     check(
         result["errors"].get(const.CONF_HOMEKIT_SOURCE_ENTRY_IDS)
         == "homekit_source_entry_unavailable",
         "an unexpected HomeKit source read failure stays in a fail-closed form",
     )
+
+    hass.config_entries.homekit_entries[0].source = "import"
+    result = await flow.async_step_homekit_source(
+        {const.CONF_HOMEKIT_SOURCE_ENTRY_IDS: ["homekit-main"]}
+    )
+    check(
+        result["step_id"] == "targets",
+        "a YAML/import HomeKit entry remains valid as a read-only source",
+    )
+    del hass.config_entries.homekit_entries[0].source
 
     selected = ["homekit-accessory", "homekit-main"]
     result = await flow.async_step_homekit_source(
@@ -880,6 +940,122 @@ async def check_disabled_and_final_save() -> None:
     check(len(confirm_flow.created_entries) == 1, "confirmation saves once")
 
 
+async def check_runtime_readiness_is_deferred() -> None:
+    """Transient platform startup state never blocks a complete saved form."""
+    for key in COUNTERS:
+        COUNTERS[key] = 0
+    flow = new_flow(FakeHass())
+    await choose_source(flow, const.SourceKind.MANUAL, enabled=True)
+    await flow.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["light.manual"]}
+    )
+    await flow.async_step_targets(
+        {
+            const.CONF_TARGET_PLATFORMS: [
+                const.TargetPlatform.GOOGLE.value,
+                const.TargetPlatform.MATTER.value,
+            ]
+        }
+    )
+    result = await flow.async_step_platform_settings(
+        {
+            const.CONF_GOOGLE_CONFIG_PATH: (
+                "google_assistant_entity_config.yaml"
+            ),
+            const.CONF_MATTER_HOST: "matterbridge.local",
+            const.CONF_MATTER_PORT: 8283,
+            const.CONF_MATTER_PASSWORD: "",
+            "google_include": [],
+            "google_exclude": [],
+            "matter_include": [],
+            "matter_exclude": [],
+        }
+    )
+    check(
+        result["step_id"] == "confirm",
+        "transient Google and Matterbridge runtime state is deferred to background retry",
+    )
+    check(
+        COUNTERS
+        == {
+            "source_reads": 0,
+            "target_reads": 0,
+            "target_validations": 0,
+        },
+        "Config Flow performs no full runtime convergence probe before saving",
+    )
+
+    invalid_matter = new_flow(FakeHass())
+    await choose_source(invalid_matter, const.SourceKind.MANUAL, enabled=True)
+    await invalid_matter.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["light.manual"]}
+    )
+    await invalid_matter.async_step_targets(
+        {const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.MATTER.value]}
+    )
+    result = await invalid_matter.async_step_platform_settings(
+        {
+            const.CONF_MATTER_HOST: "ftp://unsupported.example",
+            const.CONF_MATTER_PORT: 8283,
+            const.CONF_MATTER_PASSWORD: "",
+            "matter_include": [],
+            "matter_exclude": [],
+        }
+    )
+    check(
+        result["errors"].get("base") == "invalid_matter_endpoint",
+        "a permanently malformed Matterbridge endpoint is rejected locally",
+    )
+
+    invalid_homekit_hass = FakeHass()
+    invalid_homekit_hass.config_entries.homekit_entries[0].options["filter"][
+        "include_domains"
+    ] = ["light"]
+    invalid_homekit = new_flow(invalid_homekit_hass)
+    await choose_source(invalid_homekit, const.SourceKind.MANUAL, enabled=True)
+    await invalid_homekit.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["light.manual"]}
+    )
+    await invalid_homekit.async_step_targets(
+        {const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value]}
+    )
+    result = await invalid_homekit.async_step_platform_settings(
+        {
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: ["homekit-main"],
+            "homekit_include": [],
+            "homekit_exclude": [],
+        }
+    )
+    check(
+        result["errors"].get("base")
+        == "homekit_target_configuration_invalid",
+        "a permanently ambiguous HomeKit target filter is rejected locally",
+    )
+
+    imported_target_hass = FakeHass()
+    imported_target_hass.config_entries.homekit_entries[0].source = "import"
+    imported_target = new_flow(imported_target_hass)
+    await choose_source(imported_target, const.SourceKind.MANUAL, enabled=True)
+    await imported_target.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["light.manual"]}
+    )
+    await imported_target.async_step_targets(
+        {const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value]}
+    )
+    result = await imported_target.async_step_platform_settings(
+        {
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: ["homekit-main"],
+            "homekit_include": [],
+            "homekit_exclude": [],
+        }
+    )
+    check(
+        result["errors"].get("base")
+        == "homekit_target_configuration_invalid",
+        "a YAML/import HomeKit entry can be a source but never a writable target",
+    )
+
+
 async def _create_disabled_entry(language: str) -> tuple[Any, dict[str, Any]]:
     """Complete a safe inert flow and return its final create-entry result."""
     flow = new_flow(FakeHass(language=language))
@@ -1011,6 +1187,274 @@ async def check_options_disable_preserves_configuration() -> None:
     )
 
 
+async def check_options_complete_persistence() -> None:
+    """Every visible and hidden option survives errors and future edits."""
+    hass = FakeHass(
+        entities={
+            "light.manual",
+            "light.extra",
+            "light.new",
+            "sensor.homekit_keep",
+            "sensor.matter_keep",
+        }
+    )
+    data_rules = {
+        "google": {"include": ["light.extra"], "exclude": []},
+        "homekit": {"include": ["sensor.homekit_keep"], "exclude": []},
+        "matter": {"include": ["sensor.matter_keep"], "exclude": []},
+    }
+    # A historical partial options object must override only the operation it
+    # actually contains, not erase HomeKit and Matter rules stored in data.
+    entry = SimpleNamespace(
+        title="Cross-Platform Device Sync",
+        data={const.CONF_USER_RULES: deepcopy(data_rules)},
+        options={
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+            const.CONF_SOURCE_ENTITIES: ["light.manual"],
+            const.CONF_TARGET_PLATFORMS: [
+                const.TargetPlatform.GOOGLE.value,
+                const.TargetPlatform.HOMEKIT.value,
+                const.TargetPlatform.MATTER.value,
+            ],
+            const.CONF_GOOGLE_CONFIG_PATH: "old.yaml",
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: ["homekit-main"],
+            const.CONF_MATTER_HOST: "matterbridge.local",
+            const.CONF_MATTER_PORT: 8283,
+            const.CONF_USER_RULES: {
+                "google": {"include": ["light.extra"]}
+            },
+        },
+    )
+    options_flow = flow_module.PlatformSyncOptionsFlow()
+    options_flow.hass = hass
+    options_flow.config_entry = entry
+    await options_flow.async_step_init()
+    await options_flow.async_step_init(
+        {
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+        }
+    )
+    await options_flow.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["light.manual"]}
+    )
+    result = await options_flow.async_step_targets(
+        {
+            const.CONF_TARGET_PLATFORMS: [
+                const.TargetPlatform.GOOGLE.value,
+                const.TargetPlatform.HOMEKIT.value,
+                const.TargetPlatform.MATTER.value,
+            ]
+        }
+    )
+    check(
+        schema_default(result, "homekit_include")
+        == ["sensor.homekit_keep"]
+        and schema_default(result, "matter_include")
+        == ["sensor.matter_keep"],
+        "partial historical user_rules are deep-merged per platform",
+    )
+
+    invalid_input = {
+        const.CONF_GOOGLE_CONFIG_PATH: "../bad.yaml",
+        const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+            "homekit-main",
+            "homekit-accessory",
+        ],
+        const.CONF_MATTER_HOST: "192.0.2.44",
+        const.CONF_MATTER_PORT: 9123,
+        const.CONF_MATTER_PASSWORD: "test-front-end-password",
+        "google_include": ["light.new"],
+        "google_exclude": [],
+        "homekit_include": ["sensor.homekit_keep"],
+        "homekit_exclude": [],
+        "matter_include": ["sensor.matter_keep"],
+        "matter_exclude": [],
+    }
+    result = await options_flow.async_step_platform_settings(invalid_input)
+    check(
+        result["errors"].get(const.CONF_GOOGLE_CONFIG_PATH) == "invalid_path",
+        "invalid Google path redraws the platform form",
+    )
+    check(
+        schema_default(result, const.CONF_GOOGLE_CONFIG_PATH) == "../bad.yaml"
+        and schema_default(result, const.CONF_MATTER_HOST) == "192.0.2.44"
+        and schema_default(result, const.CONF_MATTER_PORT) == 9123
+        and schema_default(result, const.CONF_MATTER_PASSWORD)
+        == "test-front-end-password"
+        and schema_default(result, "google_include") == ["light.new"]
+        and schema_default(result, const.CONF_HOMEKIT_MANAGED_ENTRY_IDS)
+        == ["homekit-main", "homekit-accessory"],
+        "validation redraw preserves every value entered on the current page",
+    )
+
+    valid_input = deepcopy(invalid_input)
+    valid_input[const.CONF_GOOGLE_CONFIG_PATH] = (
+        "google_assistant_entity_config.yaml"
+    )
+    result = await options_flow.async_step_platform_settings(valid_input)
+    check(result["step_id"] == "confirm", "corrected settings reach confirmation")
+    saved_result = await options_flow.async_step_confirm({})
+    saved = saved_result["data"]
+    check(
+        saved[const.CONF_GOOGLE_CONFIG_PATH]
+        == "google_assistant_entity_config.yaml"
+        and saved[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+        == ["homekit-main", "homekit-accessory"]
+        and saved[const.CONF_MATTER_HOST] == "192.0.2.44"
+        and saved[const.CONF_MATTER_PORT] == 9123
+        and saved[const.CONF_MATTER_PASSWORD]
+        == "test-front-end-password",
+        "the complete target configuration is saved as one snapshot",
+    )
+    check(
+        saved[const.CONF_USER_RULES]["homekit"]["include"]
+        == ["sensor.homekit_keep"]
+        and saved[const.CONF_USER_RULES]["matter"]["include"]
+        == ["sensor.matter_keep"],
+        "the complete snapshot retains every platform rule",
+    )
+
+    # Reopen the exact saved options and verify all platform fields are filled.
+    entry.options = deepcopy(saved)
+    reopened = flow_module.PlatformSyncOptionsFlow()
+    reopened.hass = hass
+    reopened.config_entry = entry
+    await reopened.async_step_init()
+    await reopened.async_step_init(
+        {
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+        }
+    )
+    await reopened.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["light.manual"]}
+    )
+    result = await reopened.async_step_targets(
+        {const.CONF_TARGET_PLATFORMS: saved[const.CONF_TARGET_PLATFORMS]}
+    )
+    check(
+        schema_default(result, const.CONF_GOOGLE_CONFIG_PATH)
+        == saved[const.CONF_GOOGLE_CONFIG_PATH]
+        and schema_default(result, const.CONF_HOMEKIT_MANAGED_ENTRY_IDS)
+        == saved[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+        and schema_default(result, const.CONF_MATTER_HOST)
+        == saved[const.CONF_MATTER_HOST]
+        and schema_default(result, const.CONF_MATTER_PORT)
+        == saved[const.CONF_MATTER_PORT]
+        and schema_default(result, const.CONF_MATTER_PASSWORD)
+        == saved[const.CONF_MATTER_PASSWORD],
+        "reopening Configure repopulates every platform connection field",
+    )
+
+    hidden_flow = flow_module.PlatformSyncOptionsFlow()
+    hidden_flow.hass = hass
+    hidden_flow.config_entry = entry
+    await hidden_flow.async_step_init()
+    await hidden_flow.async_step_init(
+        {
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+        }
+    )
+    await hidden_flow.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["light.manual"]}
+    )
+    result = await hidden_flow.async_step_targets(
+        {const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.GOOGLE.value]}
+    )
+    check(
+        schema_keys(result)
+        == {
+            const.CONF_GOOGLE_CONFIG_PATH,
+            "google_include",
+            "google_exclude",
+        },
+        "only the currently selected target fields are rendered during editing",
+    )
+    await hidden_flow.async_step_platform_settings(
+        {
+            const.CONF_GOOGLE_CONFIG_PATH: (
+                "google_assistant_entity_config.yaml"
+            ),
+            "google_include": ["light.new"],
+            "google_exclude": [],
+        }
+    )
+    hidden_saved = (await hidden_flow.async_step_confirm({}))["data"]
+    check(
+        hidden_saved[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+        == saved[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+        and hidden_saved[const.CONF_MATTER_HOST]
+        == saved[const.CONF_MATTER_HOST]
+        and hidden_saved[const.CONF_MATTER_PORT]
+        == saved[const.CONF_MATTER_PORT]
+        and hidden_saved[const.CONF_MATTER_PASSWORD]
+        == saved[const.CONF_MATTER_PASSWORD],
+        "unselected target connection settings remain stored but hidden",
+    )
+    check(
+        hidden_saved[const.CONF_USER_RULES]["homekit"]
+        == saved[const.CONF_USER_RULES]["homekit"]
+        and hidden_saved[const.CONF_USER_RULES]["matter"]
+        == saved[const.CONF_USER_RULES]["matter"],
+        "unselected target include and exclude rules remain stored but inactive",
+    )
+
+    malformed_entry = SimpleNamespace(
+        title="Cross-Platform Device Sync",
+        data={},
+        options={
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+            const.CONF_SOURCE_ENTITIES: ["light.manual"],
+            const.CONF_SOURCE_PAGES: "not-a-page-list",
+            const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.GOOGLE.value],
+            const.CONF_MATTER_PORT: {"invalid": True},
+            const.CONF_HOMEKIT_SOURCE_ENTRY_IDS: "not-a-list",
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [7],
+        },
+    )
+    malformed_flow = flow_module.PlatformSyncOptionsFlow()
+    malformed_flow.hass = hass
+    malformed_flow.config_entry = malformed_entry
+    await malformed_flow.async_step_init()
+    await malformed_flow.async_step_init(
+        {
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+        }
+    )
+    await malformed_flow.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["light.manual"]}
+    )
+    await malformed_flow.async_step_targets(
+        {const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.GOOGLE.value]}
+    )
+    await malformed_flow.async_step_platform_settings(
+        {
+            const.CONF_GOOGLE_CONFIG_PATH: "google_assistant_entity_config.yaml",
+            "google_include": [],
+            "google_exclude": [],
+        }
+    )
+    repaired = (await malformed_flow.async_step_confirm({}))["data"]
+    check(
+        repaired[const.CONF_MATTER_PORT] == const.DEFAULT_MATTER_PORT
+        and repaired[const.CONF_HOMEKIT_SOURCE_ENTRY_IDS] == []
+        and repaired[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS] == []
+        and repaired[const.CONF_SOURCE_PAGES]
+        == [
+            {
+                "dashboard": const.DEFAULT_SOURCE_DASHBOARD,
+                "view": const.DEFAULT_SOURCE_VIEW,
+            }
+        ],
+        "malformed hidden legacy fields are safely canonicalized during an unrelated edit",
+    )
+
+
 async def main() -> None:
     check(
         flow_module.PlatformSyncConfigFlow.VERSION == 4
@@ -1023,8 +1467,10 @@ async def main() -> None:
     await check_target_selection_and_fields()
     await check_hints_and_validation()
     await check_disabled_and_final_save()
+    await check_runtime_readiness_is_deferred()
     await check_fixed_localized_titles()
     await check_options_disable_preserves_configuration()
+    await check_options_complete_persistence()
     print(f"PASS: {ASSERTIONS} config-flow acceptance assertions")
 
 

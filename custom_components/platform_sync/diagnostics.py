@@ -55,6 +55,9 @@ async def async_get_config_entry_diagnostics(hass, entry):
             "targets": sorted(platform.value for platform in config.targets),
             "google_config_path_configured": bool(config.google_config_path),
             "matter_endpoint_configured": bool(config.matter_host),
+            "matter_password_configured": bool(
+                getattr(config, "matter_password", "")
+            ),
             "homekit_source_entry_count": len(config.homekit_source_entry_ids),
             "homekit_managed_entry_count": len(config.homekit_managed_entry_ids),
             "user_rule_counts": _rule_counts(config.user_rules),

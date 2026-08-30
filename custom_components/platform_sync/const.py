@@ -16,6 +16,7 @@ CONF_SOURCE_ENTITIES = "source_entities"
 CONF_TARGET_PLATFORMS = "target_platforms"
 CONF_MATTER_HOST = "matter_host"
 CONF_MATTER_PORT = "matter_port"
+CONF_MATTER_PASSWORD = "matter_password"
 CONF_GOOGLE_CONFIG_PATH = "google_config_path"
 CONF_HOMEKIT_SOURCE_ENTRY_IDS = "homekit_source_entry_ids"
 CONF_HOMEKIT_MANAGED_ENTRY_IDS = "homekit_managed_entry_ids"
@@ -30,6 +31,7 @@ DEFAULT_SOURCE_DASHBOARD = "lovelace"
 DEFAULT_SOURCE_VIEW = "default-view"
 DEFAULT_MATTER_HOST = ""
 DEFAULT_MATTER_PORT = 8283
+DEFAULT_MATTER_PASSWORD = ""
 DEFAULT_GOOGLE_CONFIG_PATH = "google_assistant_entity_config.yaml"
 
 # Internal timing is intentionally not user configurable.  Prefer push events

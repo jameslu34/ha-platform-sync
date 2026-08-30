@@ -10,5 +10,5 @@
   "issue_tracker": "https://github.com/jameslu34/ha-platform-sync/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.6.2"
+  "version": "0.6.3"
 }

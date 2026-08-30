@@ -9,7 +9,7 @@ on:
       tag:
         description: Release tag (must match the integration version)
         required: true
-        default: "v0.6.2"
+        default: "v0.6.3"
         type: string
 
 permissions:

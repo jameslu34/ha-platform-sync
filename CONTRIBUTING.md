@@ -67,7 +67,7 @@ A pull request should:
 ## Maintainer releases
 
 After `main` passes all workflows, open **Actions → Release → Run workflow** and
-enter a tag such as `v0.6.2`. The tag must exactly match the version in
+enter a tag such as `vX.Y.Z`. The tag must exactly match the version in
 `custom_components/platform_sync/manifest.json`. The workflow reruns the
 acceptance checks, creates the tag, and publishes the GitHub release. Pushing a
 matching `v*.*.*` tag remains supported for command-line release workflows.

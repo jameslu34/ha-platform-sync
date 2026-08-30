@@ -1,6 +1,6 @@
 # 裝置平台同步：完整使用手冊
 
-> 適用版本：0.6.2
+> 適用版本：0.6.3
 > 中文名稱：裝置平台同步
 > English name: Cross-Platform Device Sync
 
@@ -108,7 +108,8 @@ google_assistant:
 
 - Matterbridge 必須正在運作。
 - `matterbridge-hass` 必須已安裝、啟用並連上 Home Assistant。
-- 準備 Matterbridge 的主機名稱或 IP，以及管理連接埠。
+- 準備 Matterbridge 的主機名稱、IP，或完整安全管理端點，以及管理連接埠。
+- 若 Matterbridge 已啟用前端驗證，請準備前端密碼。
 - 預設管理連接埠是 `8283`。
 
 ## 安裝外掛
@@ -278,8 +279,8 @@ Bridge／Accessory。
 
 適合希望以 Matterbridge 現有裝置清單為準。
 
-選擇後會直接前往目標平台頁面。Matterbridge 的主機與連接埠會在稍後的
-平台設定頁出現。
+選擇後會直接前往目標平台頁面。Matterbridge 的主機或完整端點、連接埠與
+選填的前端密碼，會在稍後的平台設定頁出現。
 
 注意：
 
@@ -309,6 +310,9 @@ Bridge／Accessory。
 
 只會更新您在此處明確勾選的 HomeKit Bridge／Accessory。作為來源的 HomeKit
 項目，不會因為被選為來源就自動取得修改權限。
+若要讓外掛長期自動更新，請選擇透過 Home Assistant UI 建立的 HomeKit 項目。
+YAML 管理的項目仍可作為唯讀 HomeKit 來源，但不能選成可更新目標，避免 Home
+Assistant 重啟後又被 YAML 覆寫回去。
 
 ### Matterbridge
 
@@ -316,6 +320,7 @@ Bridge／Accessory。
 
 - Matterbridge 主機
 - Matterbridge 連接埠
+- 選填的「Matterbridge 密碼」
 - 選填的「Matterbridge 額外加入」
 - 選填的「Matterbridge 排除」
 
@@ -405,6 +410,9 @@ Bridge／Accessory。
 外掛會優先使用 HomeKit 設定變更通知。若目前的 Home Assistant 版本無法使用
 通知機制，才會改成定期檢查。
 
+已明確選取的可更新 HomeKit 目標若發生設定變更，也會立即觸發重新檢查。平台仍在
+啟動時不會阻止保存完整設定，之後會由有上限的背景重試等待收斂。
+
 ### Google Home 或 Matterbridge 作為來源時
 
 大約每 15 秒檢查一次裝置清單。偵測到變更後才會開始同步。
@@ -414,8 +422,9 @@ Bridge／Accessory。
 啟用同步後，背景檢查也會確認 Matterbridge、`matterbridge-hass`、精確裝置清單
 與已載入裝置都已就緒。若只有執行狀態異常，且安全條件全部成立，外掛會先等待
 Matterbridge 備份真正完成，再優先重新啟動 Home Assistant 外掛；精確讀回仍未
-收斂時，才會重新啟動完整 Matterbridge 程序。每個故障階段最多執行一次，並保留
-五分鐘冷卻時間。持續失敗時，重試間隔依序為 15、30、60、120、300 秒。
+收斂時，才會重新啟動完整 Matterbridge 程序。開機後先保留三分鐘啟動寬限期，
+避免正常載入過程誤觸重啟。每個故障階段最多執行一次，並保留五分鐘冷卻時間。
+持續失敗時，重試間隔依序為 15、30、60、120、300 秒。
 
 如果管理介面無法連線、缺少憑證、外掛已停用、精確清單為空或不一致，或有其他
 篩選器正在作用，系統不會自動重啟。停用同步時，也會一併停用這項自動復原。
@@ -449,6 +458,10 @@ Matterbridge 備份真正完成，再優先重新啟動 Home Assistant 外掛；
 - Google Assistant 設定檔
 - 可更新的 HomeKit 項目
 - Matterbridge 連線資料
+
+再次開啟**設定**時，所有已儲存參數都會自動回填。若某個欄位驗證失敗，當頁其他
+剛輸入的內容不會消失。取消勾選某個目標平台時，該平台的連線資料、額外加入與排除
+會暫時隱藏且不生效，但仍會保存；日後重新勾選便會完整恢復。
 
 ## 預覽與立即同步
 
@@ -525,10 +538,11 @@ Home Assistant 標籤。
 - 確認頁面中至少放了一個具有實體 ID 的裝置。
 - 確認所有被選頁面都可以正常讀取。
 
-### HomeKit 來源不能通過
+### HomeKit 來源不能通過或無法同步
 
 - 確認選的是 Home Assistant HomeKit Bridge／Accessory。
-- 確認該 HomeKit 項目目前已載入。
+- 暫時尚未載入的項目仍可保存，但要等 HomeKit runtime 已載入且可驗證為執行中，
+  才會完成同步。
 - 確認項目使用明確的裝置清單，而不是「全部某類裝置」之類的寬鬆條件。
 - Apple 家庭原生配對裝置不會出現在這份來源清單中。
 
@@ -536,6 +550,10 @@ Home Assistant 標籤。
 
 請先在 Home Assistant 建立並配對 HomeKit Bridge／Accessory，再回到此外掛
 設定中選取。外掛不會代替使用者建立或完成 Apple 家庭配對。
+
+若目標由 YAML 管理，請改用 Home Assistant UI 重新建立可更新的
+Bridge／Accessory，或自行在 HomeKit YAML 維護精確實體清單。外掛不會接受重啟後
+變更就會消失的可寫目標。
 
 ### Google Home 顯示尚未設定完成
 
@@ -551,8 +569,10 @@ Home Assistant 標籤。
 
 確認：
 
-- 主機名稱或 IP 正確。
+- 主機名稱、IP，或完整 ws／wss／http／https 端點正確。
 - 管理連接埠正確。
+- 選填的前端密碼正確。
+- WSS 端點的憑證可被 Home Assistant 信任。
 - Matterbridge 正在運作。
 - `matterbridge-hass` 已啟用並連上 Home Assistant。
 
@@ -621,7 +641,7 @@ Apple 家庭或 Matter 控制器 App 仍可能需要一些時間更新。
 5. 目標勾選 Google Home、HomeKit、Matterbridge。
 6. 填入 Google Assistant 裝置設定檔。
 7. 勾選可更新的 HomeKit 目標項目。
-8. 填入 Matterbridge 主機與連接埠。
+8. 填入 Matterbridge 端點、連接埠與選填密碼。
 9. 視需要設定各平台的額外加入與排除。
 10. 在確認頁檢查後送出。
 
