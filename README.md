@@ -191,9 +191,10 @@ allowlists, and competing filters never authorize an automatic restart.
 - **HomeKit:** source and target choices are Home Assistant HomeKit Bridge or
   Accessory config entries. Accessories paired directly in Apple Home are not
   readable or writable through this integration. Writable targets that need
-  automatic changes must be UI-managed HomeKit entries. YAML/import-managed
-  entries can be read as sources but cannot be selected as writable targets,
-  because Home Assistant would overwrite their changes on restart.
+  automatic changes require a UI-managed main Bridge. YAML/import-managed
+  entries can be read as sources and may remain in a target layout only as
+  fixed exact single-entity Accessories; changing those Accessories still
+  belongs in HomeKit YAML because HA restores them on restart.
 - **Matterbridge:** requires a compatible and reachable `matterbridge-hass`
   management interface. A host/IP or complete `ws`, `wss`, `http`, or `https`
   endpoint may be used, with an optional frontend password. The integration

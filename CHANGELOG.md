@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-08-30
+
+### Fixed
+
+- Allow an exact YAML/import-managed single-entity HomeKit Accessory to remain
+  as a fixed member of a target layout while requiring the writable main Bridge
+  to be UI-managed. This preserves durable mixed layouts used by existing Home
+  Assistant installations without ever rewriting YAML-owned Accessories.
+
 ## [0.6.3] - 2026-08-30
 
 ### Added
@@ -105,7 +114,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - HACS-compatible repository structure, public documentation, and automated
   validation.
 
-[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.0...v0.6.1

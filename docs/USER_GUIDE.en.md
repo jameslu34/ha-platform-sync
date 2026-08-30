@@ -1,6 +1,6 @@
 # Cross-Platform Device Sync: Complete User Guide
 
-> Applies to version: 0.6.3
+> Applies to version: 0.6.4
 > English name: Cross-Platform Device Sync
 > Traditional Chinese name: 裝置平台同步
 
@@ -348,9 +348,11 @@ When HomeKit is selected, configure:
 Only the HomeKit Bridges or Accessories selected here may be updated. Selecting
 a HomeKit entry as a source does not automatically make it a writable target.
 For durable automatic updates, choose HomeKit entries created in the Home
-Assistant UI. A YAML-managed entry can still be used as a read-only HomeKit
-source, but cannot be selected as a writable target because Home Assistant
-would overwrite its changes from YAML after a restart.
+Assistant UI. A YAML-managed item can still be used as a read-only source. It
+may also stay in the managed target layout only as a fixed, exact single-entity
+Accessory; the writable main Bridge must be UI-created. The integration will
+not rewrite an imported Accessory because Home Assistant would restore it from
+YAML after a restart.
 
 ### Matterbridge
 
@@ -619,10 +621,11 @@ Create and pair a HomeKit Bridge or Accessory in Home Assistant first, then
 return to this integration and select it. Cross-Platform Device Sync does not
 create an Apple Home pairing for you.
 
-If a target is YAML-managed, recreate that writable Bridge or Accessory through
-the Home Assistant UI, or maintain its exact entity list in HomeKit YAML
-yourself. The integration will not accept a writable target whose changes would
-disappear after restart.
+If the main Bridge is YAML-managed, recreate it through the Home Assistant UI.
+An imported single-entity Accessory may remain pinned in the selected layout,
+but changing or removing it must be done in HomeKit YAML. The integration will
+not apply a temporary imported-Accessory change that would disappear after
+restart.
 
 ### Google Home setup is not ready
 

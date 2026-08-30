@@ -264,8 +264,6 @@ def _validate_target_configuration(_hass: Any, sync_config: Any, platform: Any):
             entry = available[entry_id]
             if getattr(entry, "disabled_by", None) is not None:
                 raise RuntimeError("disabled HomeKit target")
-            if str(getattr(entry, "source", "")).casefold() == "import":
-                raise RuntimeError("YAML/import HomeKit target")
             entity_filter = (entry.options or {}).get("filter")
             if (
                 not isinstance(entity_filter, dict)
@@ -282,6 +280,20 @@ def _validate_target_configuration(_hass: Any, sync_config: Any, platform: Any):
                 )
             ):
                 raise RuntimeError("invalid HomeKit target filter")
+        selected = [
+            available[entry_id]
+            for entry_id in sync_config.homekit_managed_entry_ids
+        ]
+        bridges = [
+            entry
+            for entry in selected
+            if str((entry.options or {}).get("homekit_mode", "bridge")).casefold()
+            != "accessory"
+        ]
+        if len(bridges) != 1 or str(
+            getattr(bridges[0], "source", "")
+        ).casefold() == "import":
+            raise RuntimeError("YAML/import HomeKit main target")
     elif platform is const.TargetPlatform.MATTER:
         host = str(sync_config.matter_host).strip().casefold()
         if not host or host.startswith(("ftp://", "file://")):
@@ -1052,7 +1064,32 @@ async def check_runtime_readiness_is_deferred() -> None:
     check(
         result["errors"].get("base")
         == "homekit_target_configuration_invalid",
-        "a YAML/import HomeKit entry can be a source but never a writable target",
+        "a YAML/import HomeKit main Bridge can be a source but not a writable main target",
+    )
+
+    mixed_target_hass = FakeHass()
+    mixed_target_hass.config_entries.homekit_entries[1].source = "import"
+    mixed_target = new_flow(mixed_target_hass)
+    await choose_source(mixed_target, const.SourceKind.MANUAL, enabled=True)
+    await mixed_target.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["light.manual"]}
+    )
+    await mixed_target.async_step_targets(
+        {const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value]}
+    )
+    result = await mixed_target.async_step_platform_settings(
+        {
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+                "homekit-main",
+                "homekit-accessory",
+            ],
+            "homekit_include": [],
+            "homekit_exclude": [],
+        }
+    )
+    check(
+        result["step_id"] == "confirm",
+        "a UI main Bridge plus exact imported single-entity Accessory is a valid target layout",
     )
 
 

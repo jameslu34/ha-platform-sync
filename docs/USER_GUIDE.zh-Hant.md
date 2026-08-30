@@ -1,6 +1,6 @@
 # 裝置平台同步：完整使用手冊
 
-> 適用版本：0.6.3
+> 適用版本：0.6.4
 > 中文名稱：裝置平台同步
 > English name: Cross-Platform Device Sync
 
@@ -310,9 +310,10 @@ Bridge／Accessory。
 
 只會更新您在此處明確勾選的 HomeKit Bridge／Accessory。作為來源的 HomeKit
 項目，不會因為被選為來源就自動取得修改權限。
-若要讓外掛長期自動更新，請選擇透過 Home Assistant UI 建立的 HomeKit 項目。
-YAML 管理的項目仍可作為唯讀 HomeKit 來源，但不能選成可更新目標，避免 Home
-Assistant 重啟後又被 YAML 覆寫回去。
+若要讓外掛長期自動更新，主 HomeKit Bridge 必須透過 Home Assistant UI 建立。
+YAML 管理的項目仍可作為唯讀來源，也能以「固定且精確的單一實體 Accessory」留在
+受管理目標配置中；外掛不會改寫這類匯入 Accessory，避免 Home Assistant 重啟後又
+被 YAML 覆寫回去。
 
 ### Matterbridge
 
@@ -551,9 +552,9 @@ Home Assistant 標籤。
 請先在 Home Assistant 建立並配對 HomeKit Bridge／Accessory，再回到此外掛
 設定中選取。外掛不會代替使用者建立或完成 Apple 家庭配對。
 
-若目標由 YAML 管理，請改用 Home Assistant UI 重新建立可更新的
-Bridge／Accessory，或自行在 HomeKit YAML 維護精確實體清單。外掛不會接受重啟後
-變更就會消失的可寫目標。
+若主 Bridge 由 YAML 管理，請改用 Home Assistant UI 重新建立。匯入的單實體
+Accessory 可以固定留在已選配置中，但若要更換或移除，必須自行修改 HomeKit YAML；
+外掛不會套用重啟後就會消失的匯入 Accessory 暫時變更。
 
 ### Google Home 顯示尚未設定完成
 
