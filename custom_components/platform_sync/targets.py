@@ -443,12 +443,20 @@ def validate_target_configuration(
         for entry in entries:
             if getattr(entry, "disabled_by", None) is not None:
                 raise RuntimeError("A managed HomeKit config entry is disabled")
-            if _config_entry_source(entry) == "import":
-                raise RuntimeError(
-                    "A YAML/import HomeKit entry cannot be a writable target"
-                )
             _strict_homekit_target_entities(entry)
-        _homekit_layout(entries)
+        main, dedicated = _homekit_layout(entries)
+        if _config_entry_source(main) == "import":
+            raise RuntimeError(
+                "The writable HomeKit main Bridge cannot be YAML/import-managed"
+            )
+        for entry in dedicated:
+            if (
+                _config_entry_source(entry) == "import"
+                and len(_strict_homekit_target_entities(entry)) != 1
+            ):
+                raise RuntimeError(
+                    "A YAML/import HomeKit target must be a fixed single-entity Accessory"
+                )
     elif platform is TargetPlatform.MATTER:
         _matter_ws_url(config)
 

@@ -475,6 +475,47 @@ async def check_homekit_adapter() -> int:
     else:
         raise AssertionError("An imported HomeKit entry must not be offered as writable")
 
+    mixed_main = FakeEntry(
+        "mixed-main",
+        options={
+            "filter": {"include_entities": ["light.old"]},
+            "homekit_mode": "bridge",
+        },
+    )
+    mixed_accessory = FakeEntry(
+        "mixed-accessory",
+        options={
+            "filter": {
+                "include_entities": ["lock.pinned"],
+                "include_domains": [],
+                "include_entity_globs": [],
+                "exclude_entities": [],
+                "exclude_domains": [],
+                "exclude_entity_globs": [],
+            },
+            "homekit_mode": "accessory",
+        },
+        source="import",
+    )
+    mixed_hass = FakeHass([mixed_main, mixed_accessory])
+    mixed_config = SimpleNamespace(
+        homekit_managed_entry_ids=("mixed-main", "mixed-accessory")
+    )
+    targets.validate_target_configuration(
+        mixed_hass, mixed_config, const.TargetPlatform.HOMEKIT
+    )
+    await targets._apply_homekit(
+        mixed_hass,
+        mixed_config,
+        frozenset({"light.new", "lock.pinned"}),
+    )
+    check(
+        mixed_hass.config_entries.updated == ["mixed-main"]
+        and mixed_hass.config_entries.reloaded == ["mixed-main"]
+        and targets._homekit_entities(mixed_accessory) == {"lock.pinned"},
+        "A UI-managed main Bridge can change while an exact imported Accessory stays pinned",
+    )
+
     settle_entries = [
         FakeEntry("reload-fails", source="import"),
         FakeEntry("reload-finishes", source="import"),
@@ -811,7 +852,7 @@ async def check_homekit_adapter() -> int:
             raise AssertionError(
                 "Malformed managed HomeKit target filters must never look exact"
             )
-    return 50
+    return 51
 
 
 def check_matter_runtime() -> int:
@@ -1950,9 +1991,9 @@ def check_google_room_schema() -> int:
 
 
 async def check_single_switch_runtime() -> int:
-    """Version 0.6.3 has one enable switch and no sensor/button platforms."""
+    """Version 0.6.4 has one enable switch and no sensor/button platforms."""
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
-    check(manifest["version"] == "0.6.3", "Manifest version is 0.6.3")
+    check(manifest["version"] == "0.6.4", "Manifest version is 0.6.4")
     check(const.DEFAULT_ENABLED is False, "New installations default disabled")
     check(const.PLATFORMS == (), "Version 0.4 exposes no sensor/button platforms")
     check(
