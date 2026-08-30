@@ -56,6 +56,8 @@ both user guides describe the same features and setup flow.
 - No-op detection when the calculated target sets are unchanged
 - Backup, deterministic apply order, exact readback, and reverse-order rollback
 - English and Traditional Chinese setup flows
+- Complete settings persistence across validation errors, target changes, and
+  later Configure sessions
 - No extra sensor, button, or settings entity
 
 The integration changes platform exposure configuration only. It never turns a
@@ -72,7 +74,8 @@ cameras, or media playback.
   - Google Home: Home Assistant Google Assistant configured and account-linked
   - HomeKit: one or more Home Assistant HomeKit Bridge or Accessory entries
   - Matterbridge: Matterbridge with the `matterbridge-hass` plugin running and
-    connected
+    connected; optional frontend-password and WSS reverse-proxy endpoints are
+    supported
 
 ### Tested compatibility
 
@@ -135,6 +138,11 @@ The setup wizard shows only fields required by your earlier choices:
    exclusions.
 5. Review the final summary and submit it.
 
+Every saved source and platform setting remains available for later editing.
+If a field fails validation, the other values entered on that page stay in the
+form. Settings for an unselected target are hidden and inactive, but retained
+so they are restored if that target is selected again.
+
 If synchronization is left disabled, the first page saves immediately. No
 source is read, no listener or poll is registered, and no target is changed.
 
@@ -170,8 +178,9 @@ the saved credentials and exact non-empty allowlist are still intact, a
 runtime-only failure can recover automatically. The integration waits for the
 backup archive to finish, restarts `matterbridge-hass` first, and restarts the
 full Matterbridge process only if exact readback still does not converge. It
-attempts this guarded recovery once per failure episode with a five-minute
-cooldown. Persistent failures retry after 15, 30, 60, 120, then 300 seconds.
+allows a three-minute startup grace, requires a sustained failure, then
+attempts guarded recovery once per failure episode with a five-minute cooldown.
+Persistent failures retry after 15, 30, 60, 120, then 300 seconds.
 Unreachable APIs, missing credentials, disabled plugins, malformed or changed
 allowlists, and competing filters never authorize an automatic restart.
 
@@ -181,10 +190,14 @@ allowlists, and competing filters never authorize an automatic restart.
   exposure configuration, not a direct read of the Google Home mobile app.
 - **HomeKit:** source and target choices are Home Assistant HomeKit Bridge or
   Accessory config entries. Accessories paired directly in Apple Home are not
-  readable or writable through this integration.
+  readable or writable through this integration. Writable targets that need
+  automatic changes must be UI-managed HomeKit entries. YAML/import-managed
+  entries can be read as sources but cannot be selected as writable targets,
+  because Home Assistant would overwrite their changes on restart.
 - **Matterbridge:** requires a compatible and reachable `matterbridge-hass`
-  management interface. The integration writes an exact device list and clears
-  platform-selection label filters.
+  management interface. A host/IP or complete `ws`, `wss`, `http`, or `https`
+  endpoint may be used, with an optional frontend password. The integration
+  writes an exact device list and clears platform-selection label filters.
 - **Dashboards:** device entities are collected from selected views; card style,
   layout, ordering, and non-entity content are not synchronized.
 - **Native apps:** a successful Home Assistant-side readback does not prove that

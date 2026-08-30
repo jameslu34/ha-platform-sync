@@ -34,6 +34,8 @@ from .targets import (
     GOOGLE_SYNC_TIMEOUT,
     HOMEKIT_RELOAD_TIMEOUT,
     MATTER_BACKUP_TIMEOUT,
+    MATTER_CONFIG_PERSIST_TIMEOUT,
+    MATTER_PLUGIN_RESTART_TIMEOUT,
     MATTER_REQUEST_TIMEOUT,
     MATTER_RUNTIME_TIMEOUT,
     MatterbridgeRuntimeError,
@@ -50,14 +52,16 @@ _LOGGER = logging.getLogger(__name__)
 ROLLBACK_SAFETY_MARGIN_SECONDS = 15.0
 STOP_DRAIN_SAFETY_MARGIN_SECONDS = 5.0
 # A cancelled all-target transaction may have to restore Google, HomeKit and
-# Matter in reverse order. Matter restoration can consume two management
-# requests, one runtime wait, and one three-request exact validation. Keep one
-# explicit budget for the complete rollback instead of letting HA unload return
-# while a process-restart rollback is still unverified.
+# Matter in reverse order. Matter restoration can consume a configuration
+# persistence readback, one plugin restart, two runtime waits, and exact
+# validation requests. Keep one explicit budget for the complete rollback
+# instead of letting HA unload return while recovery is still unverified.
 ROLLBACK_TIMEOUT_SECONDS = (
     GOOGLE_SYNC_TIMEOUT
     + HOMEKIT_RELOAD_TIMEOUT
-    + MATTER_RUNTIME_TIMEOUT
+    + MATTER_CONFIG_PERSIST_TIMEOUT
+    + MATTER_PLUGIN_RESTART_TIMEOUT
+    + 2 * MATTER_RUNTIME_TIMEOUT
     + 5 * MATTER_REQUEST_TIMEOUT
     + ROLLBACK_SAFETY_MARGIN_SECONDS
 )
@@ -66,6 +70,9 @@ STOP_DRAIN_TIMEOUT_SECONDS = (
     + STOP_DRAIN_SAFETY_MARGIN_SECONDS
 )
 MATTER_RECOVERY_COOLDOWN_SECONDS = 300.0
+MATTER_RECOVERY_STARTUP_GRACE_SECONDS = 180.0
+MATTER_RECOVERY_MIN_FAILURE_SECONDS = 30.0
+MATTER_RECOVERY_MIN_FAILURE_COUNT = 2
 MATTER_RECOVERY_GUARDS_KEY = "matter_recovery_guards"
 
 
@@ -142,8 +149,12 @@ class PlatformSyncManager:
         self._unsubscribers: list[Callable[[], None]] = []
         self._listeners: list[Callable[[], None]] = []
         self._direct_tasks: set[asyncio.Task[Any]] = set()
+        self._fallback_polling_started = False
         self._active_attempted_targets: set[TargetPlatform] = set()
         self._matter_recovery_guard = _matter_recovery_guard(hass, config)
+        self._started_at: float | None = None
+        self._matter_failure_count = 0
+        self._matter_failure_first_at: float | None = None
 
     async def async_start(self) -> None:
         """Start only when the master switch is enabled."""
@@ -160,7 +171,15 @@ class PlatformSyncManager:
                     er.EVENT_ENTITY_REGISTRY_UPDATED, self._handle_event
                 )
             )
-        elif self.config.source_kind is SourceKind.HOMEKIT:
+        elif self.config.source_kind in {SourceKind.GOOGLE, SourceKind.MATTER}:
+            self._start_fallback_polling()
+
+        homekit_relevant = (
+            self.config.source_kind is SourceKind.HOMEKIT
+            or TargetPlatform.HOMEKIT
+            in getattr(self.config, "targets", frozenset())
+        )
+        if homekit_relevant:
             signal = getattr(config_entries, "SIGNAL_CONFIG_ENTRY_CHANGED", None)
             if signal is None:
                 _LOGGER.warning(
@@ -180,9 +199,8 @@ class PlatformSyncManager:
                     self._start_fallback_polling()
                 else:
                     self._unsubscribers.append(unsubscribe)
-        elif self.config.source_kind in {SourceKind.GOOGLE, SourceKind.MATTER}:
-            self._start_fallback_polling()
         if self.hass.state is CoreState.running:
+            self._started_at = asyncio.get_running_loop().time()
             self.schedule("startup_scan")
         else:
             startup_unsubscribe: Callable[[], None]
@@ -194,6 +212,7 @@ class PlatformSyncManager:
                 # a later config-entry reload does not try to remove it twice.
                 if startup_unsubscribe in self._unsubscribers:
                     self._unsubscribers.remove(startup_unsubscribe)
+                self._started_at = asyncio.get_running_loop().time()
                 self.schedule("startup_scan")
 
             startup_unsubscribe = self.hass.bus.async_listen_once(
@@ -207,6 +226,7 @@ class PlatformSyncManager:
         for unsubscribe in self._unsubscribers:
             unsubscribe()
         self._unsubscribers.clear()
+        self._fallback_polling_started = False
         self._pending_reason = None
         self._startup_scan_pending = False
         self._startup_scan_required = False
@@ -279,6 +299,9 @@ class PlatformSyncManager:
         """Poll only when the source has no reliable push event."""
         from datetime import timedelta
 
+        if self._fallback_polling_started:
+            return
+        self._fallback_polling_started = True
         self._unsubscribers.append(
             async_track_time_interval(
                 self.hass,
@@ -301,6 +324,8 @@ class PlatformSyncManager:
         guard.attempted_for_episode = False
         guard.active_token = None
         guard.process_restart_attempted = False
+        self._matter_failure_count = 0
+        self._matter_failure_first_at = None
 
     def _reserve_matter_recovery_episode(self) -> object | None:
         """Reserve one complete recovery flow for the current failure episode."""
@@ -351,6 +376,20 @@ class PlatformSyncManager:
             or not background
             or not error.recoverable
         ):
+            return None
+        now = asyncio.get_running_loop().time()
+        self._matter_failure_count += 1
+        if self._matter_failure_first_at is None:
+            self._matter_failure_first_at = now
+        if self._started_at is None or (
+            now - self._started_at < MATTER_RECOVERY_STARTUP_GRACE_SECONDS
+            or self._matter_failure_count < MATTER_RECOVERY_MIN_FAILURE_COUNT
+            or now - self._matter_failure_first_at
+            < MATTER_RECOVERY_MIN_FAILURE_SECONDS
+        ):
+            _LOGGER.debug(
+                "Matterbridge is inside its startup/failure observation window; retrying without restart"
+            )
             return None
         recovery_token = self._reserve_matter_recovery_episode()
         if recovery_token is None:
@@ -410,12 +449,13 @@ class PlatformSyncManager:
 
     @callback
     def _handle_homekit_config_entry_change(self, change: Any, entry: Any) -> None:
-        """Reconcile only changes to explicitly selected HomeKit source entries."""
+        """Reconcile selected HomeKit source or managed target entries."""
         if getattr(entry, "domain", None) != "homekit":
             return
-        if getattr(entry, "entry_id", None) not in set(
-            self.config.homekit_source_entry_ids
-        ):
+        selected = set(
+            getattr(self.config, "homekit_source_entry_ids", ())
+        ) | set(getattr(self.config, "homekit_managed_entry_ids", ()))
+        if getattr(entry, "entry_id", None) not in selected:
             return
         change_value = str(getattr(change, "value", change)).casefold()
         self.schedule(f"homekit_config_entry_{change_value}")

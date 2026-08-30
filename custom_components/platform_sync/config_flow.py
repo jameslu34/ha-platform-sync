@@ -17,6 +17,7 @@ from homeassistant.helpers import entity_registry as er, selector
 
 from .config import (
     SyncConfig,
+    merge_entry_settings,
     normalize_config_entry_ids,
     normalize_dashboard_pages,
 )
@@ -28,6 +29,7 @@ from .const import (
     CONF_HOMEKIT_SOURCE_ENTRY_IDS,
     CONF_LOCKED_RULES,
     CONF_MATTER_HOST,
+    CONF_MATTER_PASSWORD,
     CONF_MATTER_PORT,
     CONF_SOURCE_DASHBOARD,
     CONF_SOURCE_ENTITIES,
@@ -39,6 +41,7 @@ from .const import (
     DEFAULT_ENABLED,
     DEFAULT_GOOGLE_CONFIG_PATH,
     DEFAULT_MATTER_HOST,
+    DEFAULT_MATTER_PASSWORD,
     DEFAULT_MATTER_PORT,
     DEFAULT_ENTRY_TITLE_EN,
     DEFAULT_ENTRY_TITLE_ZH_HANT,
@@ -53,16 +56,14 @@ from .sources import (
     EmptyDashboardSourceError,
     async_read_dashboard_source,
     async_read_dashboard_sources,
-    async_read_source,
 )
 from .targets import (
     EmptyHomeKitSourceError,
     HomeKitSourceEntryMissingError,
     HomeKitSourceEntryUnavailableError,
     HomeKitSourceFilterUnsupportedError,
-    async_read_homekit_source_entries,
-    async_read_target,
-    async_validate_target,
+    async_validate_homekit_source_entries,
+    validate_target_configuration,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ _EDITABLE_KEYS = {
     CONF_TARGET_PLATFORMS,
     CONF_MATTER_HOST,
     CONF_MATTER_PORT,
+    CONF_MATTER_PASSWORD,
     CONF_GOOGLE_CONFIG_PATH,
     CONF_HOMEKIT_SOURCE_ENTRY_IDS,
     CONF_HOMEKIT_MANAGED_ENTRY_IDS,
@@ -230,6 +232,7 @@ class _ConditionalFlowMixin:
 
     _defaults: dict[str, Any]
     _values: dict[str, Any]
+    _form_values: dict[str, Any]
     _dashboard_pages: dict[str, tuple[str, str]]
     _dashboard_options: list[dict[str, str]]
 
@@ -240,11 +243,26 @@ class _ConditionalFlowMixin:
             for key, value in defaults.items()
             if key in _EDITABLE_KEYS
         }
+        self._form_values = {}
         self._dashboard_pages = {}
         self._dashboard_options = []
 
     def _value(self, key: str, fallback: Any) -> Any:
-        return deepcopy(self._values.get(key, self._defaults.get(key, fallback)))
+        return deepcopy(
+            self._form_values.get(
+                key, self._values.get(key, self._defaults.get(key, fallback))
+            )
+        )
+
+    def _remember_form_values(self, values: Mapping[str, Any]) -> None:
+        """Keep the current page values when validation redraws the form."""
+        self._form_values.update(deepcopy(dict(values)))
+
+    def _accept_values(self, values: Mapping[str, Any]) -> None:
+        """Commit validated values and discard their temporary form copies."""
+        self._values.update(deepcopy(dict(values)))
+        for key in values:
+            self._form_values.pop(key, None)
 
     def _rule_default(self, platform: TargetPlatform, operation: str) -> list[str]:
         rules = self._defaults.get(CONF_USER_RULES, {})
@@ -278,13 +296,13 @@ class _ConditionalFlowMixin:
         if user_input is not None:
             if not bool(user_input[CONF_ENABLED]):
                 if getattr(self, "_entry", None) is None:
-                    self._values.update(user_input)
+                    self._accept_values(user_input)
                 else:
                     # Disabling is a single-purpose action. Preserve the entire
                     # existing source/target configuration for later re-enable.
                     self._values[CONF_ENABLED] = False
                 return self._finish(self._compose_user_data())
-            self._values.update(user_input)
+            self._accept_values(user_input)
             source = SourceKind(user_input[CONF_SOURCE_KIND])
             if source is SourceKind.DASHBOARD:
                 return await self.async_step_dashboard()
@@ -384,6 +402,12 @@ class _ConditionalFlowMixin:
                     self._values[CONF_SOURCE_DASHBOARD] = pages[0][0]
                     self._values[CONF_SOURCE_VIEW] = pages[0][1]
                     return await self.async_step_targets()
+            if errors:
+                self._remember_form_values({CONF_SOURCE_PAGE: tokens})
+
+        remembered_tokens = self._form_values.get(CONF_SOURCE_PAGE)
+        if isinstance(remembered_tokens, list):
+            default_tokens = list(remembered_tokens)
 
         return self.async_show_form(
             step_id="dashboard",
@@ -420,12 +444,22 @@ class _ConditionalFlowMixin:
                 except Exception:
                     errors["base"] = "dashboard_not_found"
             if not errors:
-                self._values[CONF_SOURCE_DASHBOARD] = dashboard
-                self._values[CONF_SOURCE_VIEW] = view
-                self._values[CONF_SOURCE_PAGES] = _serialize_dashboard_pages(
-                    [(dashboard, view)]
+                self._accept_values(
+                    {
+                        CONF_SOURCE_DASHBOARD: dashboard,
+                        CONF_SOURCE_VIEW: view,
+                        CONF_SOURCE_PAGES: _serialize_dashboard_pages(
+                            [(dashboard, view)]
+                        ),
+                    }
                 )
                 return await self.async_step_targets()
+            self._remember_form_values(
+                {
+                    CONF_SOURCE_DASHBOARD: dashboard,
+                    CONF_SOURCE_VIEW: view,
+                }
+            )
         return self.async_show_form(
             step_id="dashboard_path",
             data_schema=vol.Schema(
@@ -454,8 +488,9 @@ class _ConditionalFlowMixin:
             elif entities - _known_entity_ids(self.hass):
                 errors[CONF_SOURCE_ENTITIES] = "entity_not_found"
             if not errors:
-                self._values[CONF_SOURCE_ENTITIES] = sorted(entities)
+                self._accept_values({CONF_SOURCE_ENTITIES: sorted(entities)})
                 return await self.async_step_targets()
+            self._remember_form_values({CONF_SOURCE_ENTITIES: sorted(entities)})
         return self.async_show_form(
             step_id="manual",
             data_schema=vol.Schema(
@@ -492,8 +527,11 @@ class _ConditionalFlowMixin:
                     "homekit_source_entry_required"
                 )
             else:
+                self._remember_form_values(
+                    {CONF_HOMEKIT_SOURCE_ENTRY_IDS: list(selected_entry_ids)}
+                )
                 try:
-                    await async_read_homekit_source_entries(
+                    await async_validate_homekit_source_entries(
                         self.hass, selected_entry_ids
                     )
                 except HomeKitSourceEntryMissingError:
@@ -518,8 +556,12 @@ class _ConditionalFlowMixin:
                         "homekit_source_entry_unavailable"
                     )
                 if not errors:
-                    self._values[CONF_HOMEKIT_SOURCE_ENTRY_IDS] = list(
-                        selected_entry_ids
+                    self._accept_values(
+                        {
+                            CONF_HOMEKIT_SOURCE_ENTRY_IDS: list(
+                                selected_entry_ids
+                            )
+                        }
                     )
                     return await self.async_step_targets()
 
@@ -556,8 +598,17 @@ class _ConditionalFlowMixin:
                 except ValueError:
                     errors[CONF_TARGET_PLATFORMS] = "invalid_target"
                 else:
-                    self._values[CONF_TARGET_PLATFORMS] = targets
+                    self._accept_values({CONF_TARGET_PLATFORMS: targets})
                     return await self.async_step_platform_settings()
+            self._remember_form_values(
+                {
+                    CONF_TARGET_PLATFORMS: [
+                        str(value)
+                        for value in raw_targets
+                        if isinstance(value, str)
+                    ]
+                }
+            )
         return self.async_show_form(
             step_id="targets",
             data_schema=vol.Schema(
@@ -626,6 +677,16 @@ class _ConditionalFlowMixin:
                     default=self._value(CONF_MATTER_PORT, DEFAULT_MATTER_PORT),
                 )
             ] = vol.Coerce(int)
+            schema[
+                vol.Optional(
+                    CONF_MATTER_PASSWORD,
+                    default=self._value(
+                        CONF_MATTER_PASSWORD, DEFAULT_MATTER_PASSWORD
+                    ),
+                )
+            ] = selector.TextSelector(
+                selector.TextSelectorConfig(type="password")
+            )
 
         for platform in targets:
             for operation in ("include", "exclude"):
@@ -667,6 +728,100 @@ class _ConditionalFlowMixin:
             for key, value in self._values.items()
             if key in _EDITABLE_KEYS
         }
+        result.setdefault(CONF_ENABLED, DEFAULT_ENABLED)
+        result.setdefault(CONF_SOURCE_KIND, SourceKind.DASHBOARD.value)
+        result.setdefault(CONF_SOURCE_DASHBOARD, DEFAULT_SOURCE_DASHBOARD)
+        result.setdefault(CONF_SOURCE_VIEW, DEFAULT_SOURCE_VIEW)
+        result.setdefault(
+            CONF_SOURCE_PAGES,
+            _serialize_dashboard_pages(
+                normalize_dashboard_pages(
+                    None,
+                    fallback_dashboard=str(result[CONF_SOURCE_DASHBOARD]),
+                    fallback_view=str(result[CONF_SOURCE_VIEW]),
+                )
+            ),
+        )
+        result.setdefault(CONF_SOURCE_ENTITIES, [])
+        result.setdefault(
+            CONF_TARGET_PLATFORMS, [platform.value for platform in ALL_TARGETS]
+        )
+        result.setdefault(CONF_MATTER_HOST, DEFAULT_MATTER_HOST)
+        result.setdefault(CONF_MATTER_PORT, DEFAULT_MATTER_PORT)
+        result.setdefault(CONF_MATTER_PASSWORD, DEFAULT_MATTER_PASSWORD)
+        result.setdefault(CONF_GOOGLE_CONFIG_PATH, DEFAULT_GOOGLE_CONFIG_PATH)
+        result.setdefault(CONF_HOMEKIT_SOURCE_ENTRY_IDS, [])
+        result.setdefault(CONF_HOMEKIT_MANAGED_ENTRY_IDS, [])
+
+        # Canonicalize every persisted field, including values currently hidden
+        # by the conditional UI.  This keeps a malformed legacy or manually
+        # edited inactive field from crashing an unrelated Options Flow edit.
+        try:
+            result[CONF_SOURCE_KIND] = SourceKind(
+                result.get(CONF_SOURCE_KIND, SourceKind.DASHBOARD.value)
+            ).value
+        except (TypeError, ValueError):
+            result[CONF_SOURCE_KIND] = SourceKind.DASHBOARD.value
+        source_dashboard = (
+            str(result.get(CONF_SOURCE_DASHBOARD, DEFAULT_SOURCE_DASHBOARD)).strip()
+            or DEFAULT_SOURCE_DASHBOARD
+        )
+        source_view = (
+            str(result.get(CONF_SOURCE_VIEW, DEFAULT_SOURCE_VIEW)).strip()
+            or DEFAULT_SOURCE_VIEW
+        )
+        result[CONF_SOURCE_DASHBOARD] = source_dashboard
+        result[CONF_SOURCE_VIEW] = source_view
+        result[CONF_SOURCE_PAGES] = _serialize_dashboard_pages(
+            normalize_dashboard_pages(
+                result.get(CONF_SOURCE_PAGES),
+                fallback_dashboard=source_dashboard,
+                fallback_view=source_view,
+            )
+        )
+        result[CONF_SOURCE_ENTITIES] = sorted(
+            normalize_entities(result.get(CONF_SOURCE_ENTITIES, []))
+        )
+        normalized_targets: list[str] = []
+        raw_targets = result.get(CONF_TARGET_PLATFORMS, [])
+        if isinstance(raw_targets, (list, tuple, set, frozenset)):
+            for raw_target in raw_targets:
+                try:
+                    target = TargetPlatform(raw_target).value
+                except (TypeError, ValueError):
+                    continue
+                if target not in normalized_targets:
+                    normalized_targets.append(target)
+        result[CONF_TARGET_PLATFORMS] = normalized_targets or [
+            platform.value for platform in ALL_TARGETS
+        ]
+        result[CONF_MATTER_HOST] = (
+            str(result.get(CONF_MATTER_HOST, DEFAULT_MATTER_HOST)).strip()
+            or DEFAULT_MATTER_HOST
+        )
+        try:
+            matter_port = int(result.get(CONF_MATTER_PORT, DEFAULT_MATTER_PORT))
+        except (TypeError, ValueError):
+            matter_port = DEFAULT_MATTER_PORT
+        result[CONF_MATTER_PORT] = (
+            matter_port if 1 <= matter_port <= 65535 else DEFAULT_MATTER_PORT
+        )
+        result[CONF_MATTER_PASSWORD] = str(
+            result.get(CONF_MATTER_PASSWORD, DEFAULT_MATTER_PASSWORD) or ""
+        )
+        result[CONF_GOOGLE_CONFIG_PATH] = str(
+            result.get(CONF_GOOGLE_CONFIG_PATH, DEFAULT_GOOGLE_CONFIG_PATH)
+        )
+        for entry_key in (
+            CONF_HOMEKIT_SOURCE_ENTRY_IDS,
+            CONF_HOMEKIT_MANAGED_ENTRY_IDS,
+        ):
+            try:
+                result[entry_key] = list(
+                    normalize_config_entry_ids(result.get(entry_key, []))
+                )
+            except ValueError:
+                result[entry_key] = []
         existing_rules = deepcopy(self._defaults.get(CONF_USER_RULES, {}))
         targets = set(result.get(CONF_TARGET_PLATFORMS, []))
         packed_rules: dict[str, dict[str, list[str]]] = {}
@@ -695,35 +850,39 @@ class _ConditionalFlowMixin:
     async def _validate_platform_readiness(
         self, user_data: Mapping[str, Any]
     ) -> str | None:
+        """Reject permanent local selection errors, not transient runtime state.
+
+        Runtime convergence is owned by the manager's bounded retry loop.  A
+        Home Assistant startup race, HomeKit reload, or Matterbridge plugin
+        warm-up must never prevent an otherwise complete options snapshot from
+        being saved for the next automatic attempt.
+        """
         config = self._candidate_config(user_data)
         if not config.enabled:
             return None
-        source = config.source_kind
-        if source not in {SourceKind.DASHBOARD, SourceKind.MANUAL}:
+        if TargetPlatform.HOMEKIT in config.targets:
+            available = {
+                entry.entry_id: entry
+                for entry in self.hass.config_entries.async_entries("homekit")
+            }
+            if set(config.homekit_managed_entry_ids) - set(available):
+                return "homekit_target_entry_not_found"
             try:
-                await async_read_source(self.hass, config)
-            except Exception as error:
-                _LOGGER.debug("Source prerequisite validation failed: %s", error)
-                return {
-                    SourceKind.GOOGLE: "google_setup_required",
-                    SourceKind.HOMEKIT: "homekit_setup_required",
-                    SourceKind.MATTER: "matter_setup_required",
-                }[source]
-        for platform in TargetPlatform:
-            if platform not in config.targets:
-                continue
-            try:
-                current = await async_read_target(self.hass, config, platform)
-                await async_validate_target(self.hass, config, platform, current)
-            except Exception as error:
-                _LOGGER.debug(
-                    "%s prerequisite validation failed: %s", platform.value, error
+                validate_target_configuration(
+                    self.hass, config, TargetPlatform.HOMEKIT
                 )
-                return {
-                    TargetPlatform.GOOGLE: "google_setup_required",
-                    TargetPlatform.HOMEKIT: "homekit_setup_required",
-                    TargetPlatform.MATTER: "matter_setup_required",
-                }[platform]
+            except RuntimeError:
+                return "homekit_target_configuration_invalid"
+        if (
+            config.source_kind is SourceKind.MATTER
+            or TargetPlatform.MATTER in config.targets
+        ):
+            try:
+                validate_target_configuration(
+                    self.hass, config, TargetPlatform.MATTER
+                )
+            except (TypeError, ValueError, RuntimeError):
+                return "invalid_matter_endpoint"
         return None
 
     async def async_step_platform_settings(
@@ -755,14 +914,32 @@ class _ConditionalFlowMixin:
                 CONF_HOMEKIT_MANAGED_ENTRY_IDS
             ):
                 errors[CONF_HOMEKIT_MANAGED_ENTRY_IDS] = "homekit_entry_required"
+            elif relevant_homekit:
+                try:
+                    user_input[CONF_HOMEKIT_MANAGED_ENTRY_IDS] = list(
+                        normalize_config_entry_ids(
+                            user_input.get(CONF_HOMEKIT_MANAGED_ENTRY_IDS),
+                            required=True,
+                        )
+                    )
+                except ValueError:
+                    errors[CONF_HOMEKIT_MANAGED_ENTRY_IDS] = (
+                        "homekit_entry_required"
+                    )
             if relevant_matter:
                 host = str(user_input.get(CONF_MATTER_HOST, "")).strip()
-                port = int(user_input.get(CONF_MATTER_PORT, 0))
+                try:
+                    port = int(user_input.get(CONF_MATTER_PORT, 0))
+                except (TypeError, ValueError):
+                    port = 0
                 if not host:
                     errors[CONF_MATTER_HOST] = "required"
                 if not 1 <= port <= 65535:
                     errors[CONF_MATTER_PORT] = "invalid_port"
                 user_input[CONF_MATTER_HOST] = host
+                user_input[CONF_MATTER_PASSWORD] = str(
+                    user_input.get(CONF_MATTER_PASSWORD, "")
+                )
 
             known = _known_entity_ids(self.hass)
             entry_data = getattr(getattr(self, "_entry", None), "data", {})
@@ -784,8 +961,9 @@ class _ConditionalFlowMixin:
                 user_input[include_key] = sorted(include)
                 user_input[exclude_key] = sorted(exclude)
 
+            self._remember_form_values(user_input)
             if not errors:
-                self._values.update(user_input)
+                self._accept_values(user_input)
                 user_data = self._compose_user_data()
                 readiness_error = await self._validate_platform_readiness(user_data)
                 if readiness_error:
@@ -925,8 +1103,9 @@ class PlatformSyncOptionsFlow(
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         if self._entry is None:
             self._entry = self.config_entry
-            defaults = dict(self._entry.data)
-            defaults.update(self._entry.options)
+            defaults = merge_entry_settings(
+                self._entry.data, self._entry.options
+            )
             self._initialize(defaults)
         return await self._async_source_step("init", user_input)
 

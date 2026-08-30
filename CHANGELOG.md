@@ -7,6 +7,52 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-30
+
+### Added
+
+- Added optional Matterbridge frontend-password authentication and support for
+  complete `ws`, `wss`, `http`, or `https` management endpoints, including
+  reverse-proxy paths and IPv6 hosts. TLS verification remains enabled by
+  default and credentials are omitted from diagnostics and error messages.
+- Added fail-closed HomeKit runtime-status readback. A target is accepted only
+  when every selected Bridge or Accessory is loaded and its runtime is
+  verifiably running.
+
+### Changed
+
+- Runtime warm-up no longer blocks the final configuration step. Complete
+  settings are saved first, then the existing bounded background retries wait
+  for Google Home, HomeKit, or Matterbridge to converge.
+- Matterbridge automatic recovery now observes a three-minute startup grace and
+  a sustained failure window before any guarded restart is eligible.
+- HomeKit target Config Entry changes now wake reconciliation. UI-created
+  HomeKit entries rely on their native update listener instead of receiving a
+  duplicate reload, and unchanged entries are not reloaded at all.
+- Changed HomeKit source selection to validate its durable entity filters
+  without blocking on a temporary startup state; runtime readiness is retried
+  after the complete configuration has been saved.
+
+### Fixed
+
+- Preserve the current form values after validation errors instead of
+  reverting fields to their previous saved values.
+- Save and reopen a complete canonical options snapshot, including source
+  details, Google Assistant YAML path, selected HomeKit entries, Matterbridge
+  connection fields, and all three platforms' additions and exclusions.
+  Settings for temporarily unselected platforms remain stored but inactive.
+- Deep-merge partial historical `user_rules` options so one platform cannot
+  erase another platform's additions or exclusions.
+- Wait for Matterbridge to report the newly saved exact allowlist before
+  restarting `matterbridge-hass`; a restart timeout is treated as an uncertain
+  result and is resolved by readback without sending a second restart.
+- Extend Matterbridge restart and runtime deadlines for larger installations,
+  and extend rollback/unload budgets to cover those verified operations.
+- Reject YAML/import-managed HomeKit entries as writable targets while still
+  allowing them as read-only sources, preventing temporary updates that would
+  revert after an HA restart. Multiple HomeKit reloads now settle before
+  rollback begins.
+
 ## [0.6.2] - 2026-08-29
 
 ### Added
@@ -59,7 +105,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - HACS-compatible repository structure, public documentation, and automated
   validation.
 
-[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jameslu34/ha-platform-sync/releases/tag/v0.6.0

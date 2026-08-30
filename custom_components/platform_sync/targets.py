@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import yaml as yaml_util
@@ -22,8 +23,10 @@ from .models import TargetPlan, normalize_entities
 
 MATTER_PLUGIN = "matterbridge-hass"
 MATTER_REQUEST_TIMEOUT = 15.0
+MATTER_CONFIG_PERSIST_TIMEOUT = 30.0
+MATTER_PLUGIN_RESTART_TIMEOUT = 180.0
 MATTER_BACKUP_TIMEOUT = 120.0
-MATTER_RUNTIME_TIMEOUT = 60.0
+MATTER_RUNTIME_TIMEOUT = 180.0
 GOOGLE_SYNC_TIMEOUT = 30.0
 HOMEKIT_RELOAD_TIMEOUT = 60.0
 HOMEKIT_FILTER_KEYS = (
@@ -51,6 +54,53 @@ MATTER_EMPTY_LIST_FILTER_KEYS = (
 )
 MATTER_EMPTY_MAPPING_FILTER_KEYS = ("deviceEntityBlackList",)
 ENTITY_ID_PATTERN = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+
+
+def _matter_ws_url(config: SyncConfig) -> str:
+    """Build a Matterbridge WebSocket endpoint without weakening TLS.
+
+    Existing installations can keep a plain host/IP plus port.  Advanced
+    installations may provide a complete ws/wss/http/https endpoint (including
+    a reverse-proxy path); HTTP schemes are converted to their WebSocket
+    equivalents and certificate verification remains aiohttp's secure default.
+    """
+    host = str(config.matter_host).strip()
+    password = str(getattr(config, "matter_password", ""))
+    if "://" in host:
+        parsed = urlsplit(host)
+        scheme = parsed.scheme.casefold()
+        if scheme not in {"ws", "wss", "http", "https"} or not parsed.hostname:
+            raise RuntimeError("Matterbridge endpoint URL is invalid")
+        ws_scheme = {"http": "ws", "https": "wss"}.get(scheme, scheme)
+        hostname = parsed.hostname
+        rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+        port = parsed.port
+        if port is None:
+            port = 443 if ws_scheme == "wss" else 80
+        if parsed.username is not None or parsed.password is not None:
+            raise RuntimeError("Matterbridge endpoint credentials must not be in the URL")
+        query_items = parse_qsl(parsed.query, keep_blank_values=True)
+        if any(key.casefold() == "password" for key, _value in query_items):
+            raise RuntimeError(
+                "Matterbridge endpoint password must use the password field"
+            )
+        if password:
+            query_items.append(("password", password))
+        netloc = f"{rendered_host}:{port}"
+        path = parsed.path or "/"
+        return urlunsplit((ws_scheme, netloc, path, urlencode(query_items), ""))
+
+    if not host:
+        raise RuntimeError("Matterbridge host is required")
+    rendered_host = host
+    if host.startswith("[") and host.endswith("]"):
+        rendered_host = host
+    elif ":" in host:
+        rendered_host = f"[{host}]"
+    query = urlencode({"password": password}) if password else ""
+    return urlunsplit(
+        ("ws", f"{rendered_host}:{int(config.matter_port)}", "/", query, "")
+    )
 
 
 @dataclass(slots=True)
@@ -88,6 +138,10 @@ class MatterbridgeRuntimeError(RuntimeError):
         super().__init__(f"Matterbridge runtime is not ready ({reason})")
 
 
+class MatterbridgeCommandTimeoutError(RuntimeError):
+    """A command was sent but its final remote result is uncertain."""
+
+
 class MatterbridgeProcessRestartError(RuntimeError):
     """A full Matterbridge restart was attempted but did not converge."""
 
@@ -111,6 +165,28 @@ class EmptyHomeKitSourceError(RuntimeError):
 def _state_value(entry: Any) -> str:
     state = getattr(entry, "state", None)
     return str(getattr(state, "value", state or "")).casefold()
+
+
+def _config_entry_source(entry: Any) -> str:
+    source = getattr(entry, "source", None)
+    return str(getattr(source, "value", source or "")).casefold()
+
+
+def _homekit_runtime_running(entry: Any) -> bool | None:
+    """Read HomeKit runtime status when the installed HA exposes it."""
+    runtime = getattr(entry, "runtime_data", None)
+    homekit = getattr(runtime, "homekit", None)
+    status = getattr(homekit, "status", None)
+    if status is None:
+        return None
+    name = str(getattr(status, "name", "")).casefold()
+    value = getattr(status, "value", status)
+    if name:
+        return name == "running"
+    if isinstance(value, str):
+        return value.casefold() == "running"
+    # HA HomeKit currently exposes STATUS_RUNNING as integer 1.
+    return value == 1
 
 
 def _homekit_filter(entry: Any) -> dict[str, Any]:
@@ -276,10 +352,13 @@ def _managed_homekit_entries(hass: HomeAssistant, config: SyncConfig) -> list[An
     return [available[entry_id] for entry_id in requested]
 
 
-async def async_read_homekit_source_entries(
-    hass: HomeAssistant, requested_entry_ids: tuple[str, ...]
+def _homekit_source_entities(
+    hass: HomeAssistant,
+    requested_entry_ids: tuple[str, ...],
+    *,
+    require_loaded: bool,
 ) -> frozenset[str]:
-    """Read only explicitly selected HomeKit entries as an exact source set."""
+    """Read exact HomeKit source filters with optional runtime readiness."""
     requested = tuple(dict.fromkeys(requested_entry_ids))
     if not requested:
         raise HomeKitSourceEntryMissingError(
@@ -298,7 +377,11 @@ async def async_read_homekit_source_entries(
     entities: set[str] = set()
     for entry_id in requested:
         entry = available[entry_id]
-        if _state_value(entry) != "loaded":
+        if getattr(entry, "disabled_by", None) is not None:
+            raise HomeKitSourceEntryUnavailableError(
+                "A selected HomeKit source Config Entry is disabled"
+            )
+        if require_loaded and _state_value(entry) != "loaded":
             raise HomeKitSourceEntryUnavailableError(
                 "A selected HomeKit source Config Entry is not loaded"
             )
@@ -313,6 +396,24 @@ async def async_read_homekit_source_entries(
     if not entities:
         raise EmptyHomeKitSourceError("Selected HomeKit source entries are empty")
     return frozenset(entities)
+
+
+async def async_validate_homekit_source_entries(
+    hass: HomeAssistant, requested_entry_ids: tuple[str, ...]
+) -> frozenset[str]:
+    """Validate permanent HomeKit source structure without requiring runtime."""
+    return _homekit_source_entities(
+        hass, requested_entry_ids, require_loaded=False
+    )
+
+
+async def async_read_homekit_source_entries(
+    hass: HomeAssistant, requested_entry_ids: tuple[str, ...]
+) -> frozenset[str]:
+    """Read explicitly selected loaded HomeKit entries as an exact source."""
+    return _homekit_source_entities(
+        hass, requested_entry_ids, require_loaded=True
+    )
 
 
 def _homekit_layout(entries: list[Any]) -> tuple[Any, list[Any]]:
@@ -331,6 +432,25 @@ def _homekit_layout(entries: list[Any]) -> tuple[Any, list[Any]]:
     if any(len(_homekit_entities(entry)) > 1 for entry in dedicated):
         raise RuntimeError("A managed HomeKit side entry exposes more than one entity")
     return main, dedicated
+
+
+def validate_target_configuration(
+    hass: HomeAssistant, config: SyncConfig, platform: TargetPlatform
+) -> None:
+    """Validate permanent local target structure without runtime convergence."""
+    if platform is TargetPlatform.HOMEKIT:
+        entries = _managed_homekit_entries(hass, config)
+        for entry in entries:
+            if getattr(entry, "disabled_by", None) is not None:
+                raise RuntimeError("A managed HomeKit config entry is disabled")
+            if _config_entry_source(entry) == "import":
+                raise RuntimeError(
+                    "A YAML/import HomeKit entry cannot be a writable target"
+                )
+            _strict_homekit_target_entities(entry)
+        _homekit_layout(entries)
+    elif platform is TargetPlatform.MATTER:
+        _matter_ws_url(config)
 
 
 def _google_context(hass: HomeAssistant) -> tuple[Any, Any, dict[str, Any]]:
@@ -417,7 +537,12 @@ async def _matter_request(
     """Call the local Matterbridge websocket API without logging credentials."""
     import aiohttp
 
-    url = f"ws://{config.matter_host}:{config.matter_port}/"
+    url = _matter_ws_url(config)
+    timeout = (
+        MATTER_PLUGIN_RESTART_TIMEOUT
+        if command == "restartplugin"
+        else MATTER_REQUEST_TIMEOUT
+    )
     request_id = secrets.randbelow(9_990_000) + 10_000
     request = {
         "id": request_id,
@@ -428,7 +553,7 @@ async def _matter_request(
         "params": dict(payload or {}),
     }
     try:
-        async with asyncio.timeout(MATTER_REQUEST_TIMEOUT):
+        async with asyncio.timeout(timeout):
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(url, heartbeat=20) as ws:
                     await ws.send_json(request)
@@ -445,7 +570,15 @@ async def _matter_request(
                             raise RuntimeError(f"Matterbridge {command} failed")
                         return response.get("response")
     except TimeoutError as error:
-        raise RuntimeError(f"Matterbridge {command} timed out") from error
+        raise MatterbridgeCommandTimeoutError(
+            f"Matterbridge {command} timed out"
+        ) from error
+    except RuntimeError:
+        raise
+    except Exception:
+        raise RuntimeError(
+            f"Matterbridge {command} connection failed"
+        ) from None
 
 
 async def _matter_fire_and_forget(
@@ -454,7 +587,7 @@ async def _matter_fire_and_forget(
     """Send a command whose successful execution closes the management socket."""
     import aiohttp
 
-    url = f"ws://{config.matter_host}:{config.matter_port}/"
+    url = _matter_ws_url(config)
     request = {
         "id": secrets.randbelow(9_990_000) + 10_000,
         "sender": "PlatformSync",
@@ -472,17 +605,17 @@ async def _matter_fire_and_forget(
         raise RuntimeError(
             f"Matterbridge {command} command could not be sent"
         ) from error
-    except Exception as error:
+    except Exception:
         raise RuntimeError(
             f"Matterbridge {command} command could not be sent"
-        ) from error
+        ) from None
 
 
 async def _matter_create_backup_ready(config: SyncConfig) -> None:
     """Wait for both the backup request acknowledgement and archive completion."""
     import aiohttp
 
-    url = f"ws://{config.matter_host}:{config.matter_port}/"
+    url = _matter_ws_url(config)
     request_id = secrets.randbelow(9_990_000) + 10_000
     request = {
         "id": request_id,
@@ -530,8 +663,8 @@ async def _matter_create_backup_ready(config: SyncConfig) -> None:
         raise RuntimeError(
             "Matterbridge backup did not complete before the safety deadline"
         ) from error
-    except Exception as error:
-        raise RuntimeError("Matterbridge backup completion is unverified") from error
+    except Exception:
+        raise RuntimeError("Matterbridge backup completion is unverified") from None
 
 
 def _find_matter_plugin(value: Any) -> Mapping[str, Any]:
@@ -918,9 +1051,14 @@ async def async_validate_target(
         seen: set[str] = set()
         duplicates: set[str] = set()
         loaded = 0
+        runtime_verified = 0
         for entry in entries:
             if _state_value(entry) != "loaded":
                 raise RuntimeError("A managed HomeKit config entry is not loaded")
+            runtime_running = _homekit_runtime_running(entry)
+            if runtime_running is not True:
+                raise RuntimeError("A managed HomeKit runtime is not verifiably running")
+            runtime_verified += 1
             loaded += 1
             values = set(_strict_homekit_target_entities(entry))
             duplicates.update(seen & values)
@@ -934,6 +1072,7 @@ async def async_validate_target(
             "loaded_entries": loaded,
             "managed_entries": len(entries),
             "duplicates": 0,
+            "runtime_verified_entries": runtime_verified,
         }
 
     snapshot = await _read_matter_runtime_snapshot(config)
@@ -1010,22 +1149,58 @@ async def _request_google_sync(hass: HomeAssistant) -> None:
 
 
 async def _reload_homekit_entries(
-    hass: HomeAssistant, entries: list[Any], *, rollback: bool = False
+    hass: HomeAssistant,
+    entries: list[Any],
+    previous_runtime: Mapping[str, Any],
+    *,
+    rollback: bool = False,
 ) -> None:
-    """Reload all managed HomeKit entries within one total deadline."""
-    try:
-        async with asyncio.timeout(HOMEKIT_RELOAD_TIMEOUT):
-            for entry in entries:
+    """Let native UI listeners reload once; explicitly reload other entries."""
+
+    async def reload_one(entry: Any) -> None:
+        action = "rollback reload" if rollback else "config entry reload"
+        old_runtime = previous_runtime.get(entry.entry_id)
+        entry_source = _config_entry_source(entry)
+        native_listener_expected = (
+            bool(entry_source)
+            and entry_source != "import"
+            and old_runtime is not None
+        )
+        try:
+            async with asyncio.timeout(HOMEKIT_RELOAD_TIMEOUT):
+                if native_listener_expected:
+                    while True:
+                        current_runtime = getattr(entry, "runtime_data", None)
+                        if (
+                            _state_value(entry) == "loaded"
+                            and current_runtime is not old_runtime
+                            and _homekit_runtime_running(entry) is True
+                        ):
+                            return
+                        await asyncio.sleep(0.25)
                 if await hass.config_entries.async_reload(entry.entry_id) is False:
-                    action = "rollback reload" if rollback else "config entry reload"
                     raise RuntimeError(f"HomeKit {action} failed")
-                if not rollback and _state_value(entry) != "loaded":
+                if _state_value(entry) != "loaded":
                     raise RuntimeError(
                         "HomeKit config entry did not return to loaded"
                     )
-    except TimeoutError as error:
-        action = "rollback reload" if rollback else "config entry reload"
-        raise RuntimeError(f"HomeKit {action} timed out") from error
+                if _homekit_runtime_running(entry) is not True:
+                    raise RuntimeError(
+                        "HomeKit runtime did not return to a verifiably running state"
+                    )
+        except TimeoutError as error:
+            raise RuntimeError(f"HomeKit {action} timed out") from error
+
+    # Wait for every bounded reload task to settle before a caller begins
+    # rollback.  A native HomeKit update listener runs outside these tasks, so
+    # cancelling siblings on the first failure could race a still-running
+    # apply reload against rollback.
+    results = await asyncio.gather(
+        *(reload_one(entry) for entry in entries), return_exceptions=True
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
 
 
 async def _apply_google(
@@ -1071,33 +1246,100 @@ async def _apply_homekit(
             f"New HomeKit accessory-mode entries must be created first: {len(needs_accessory)}"
         )
 
+    updates: list[tuple[Any, dict[str, Any]]] = []
     for entry in dedicated:
         kept = _homekit_entities(entry) & desired
         if not kept:
             raise RuntimeError(
                 "A managed HomeKit Accessory would become empty; remove or unmanage it first"
             )
-        hass.config_entries.async_update_entry(
-            entry, options=_homekit_options_with_entities(entry, kept)
-        )
+        updates.append((entry, _homekit_options_with_entities(entry, kept)))
     main_entities = desired - assigned
     if not main_entities:
         raise RuntimeError("The managed HomeKit main Bridge would become empty")
-    hass.config_entries.async_update_entry(
-        main, options=_homekit_options_with_entities(main, main_entities)
-    )
-    await _reload_homekit_entries(hass, [main, *dedicated])
+    updates.append((main, _homekit_options_with_entities(main, main_entities)))
+    changed_updates = [
+        (entry, options)
+        for entry, options in updates
+        if dict(entry.options or {}) != options
+    ]
+    # YAML/import HomeKit entries are re-derived from configuration.yaml on a
+    # later reload or HA restart.  Mutating their Config Entry options would
+    # therefore only appear to work temporarily.  Fail before touching any
+    # entry so a mixed UI/import layout remains atomic and recoverable.
+    if any(_config_entry_source(entry) == "import" for entry, _ in changed_updates):
+        raise RuntimeError(
+            "A changed HomeKit target is YAML-managed; migrate it to a UI-managed "
+            "entry or update its YAML explicitly"
+        )
+    previous_runtime: dict[str, Any] = {}
+    changed_ids: set[str] = set()
+    for entry, options in changed_updates:
+        previous_runtime[entry.entry_id] = getattr(entry, "runtime_data", None)
+        hass.config_entries.async_update_entry(entry, options=options)
+        changed_ids.add(entry.entry_id)
+    changed_entries = [
+        entry for entry in [main, *dedicated] if entry.entry_id in changed_ids
+    ]
+    if changed_entries:
+        await _reload_homekit_entries(
+            hass, changed_entries, previous_runtime=previous_runtime
+        )
 
 
 async def _save_matter_config(
     config: SyncConfig, plugin_config: Mapping[str, Any]
 ) -> None:
+    expected = _strict_matter_allowlist(plugin_config)
+    _require_empty_matter_filters(plugin_config)
     await _matter_request(
         config,
         "savepluginconfig",
         {"pluginName": MATTER_PLUGIN, "formData": deepcopy(dict(plugin_config))},
     )
-    await _matter_request(config, "restartplugin", {"pluginName": MATTER_PLUGIN})
+    await _wait_matter_config_persisted(config, expected)
+    try:
+        await _matter_request(
+            config, "restartplugin", {"pluginName": MATTER_PLUGIN}
+        )
+    except RuntimeError as restart_error:
+        # A timeout, socket close, or response error after sending the command
+        # can all leave the remote restart running.  Never resend it: converge
+        # only by reading the exact allowlist and runtime until the deadline.
+        try:
+            await _wait_matter_runtime(config, expected)
+        except Exception as readback_error:
+            raise RuntimeError(
+                "Matterbridge restart result could not be verified"
+            ) from (restart_error if restart_error is not None else readback_error)
+
+
+async def _wait_matter_config_persisted(
+    config: SyncConfig,
+    expected: frozenset[str],
+    timeout: float = MATTER_CONFIG_PERSIST_TIMEOUT,
+) -> None:
+    """Wait until Matterbridge reports the newly saved exact filter config."""
+    last_error: Exception | None = None
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                try:
+                    plugins = await _matter_request(config, "plugins")
+                    plugin_config = _matter_plugin_config(
+                        _find_matter_plugin(plugins)
+                    )
+                    configured = _strict_matter_allowlist(plugin_config)
+                    _require_empty_matter_filters(plugin_config)
+                    if configured == expected:
+                        return
+                except Exception as error:
+                    last_error = error
+                await asyncio.sleep(0.5)
+    except TimeoutError as error:
+        raise RuntimeError(
+            "Matterbridge saved configuration could not be verified"
+        ) from (last_error or error)
 
 
 async def _apply_matter(
@@ -1196,11 +1438,24 @@ async def async_restore_target(
     elif backup.platform is TargetPlatform.HOMEKIT:
         entries = _managed_homekit_entries(hass, config)
         by_id = {entry.entry_id: entry for entry in entries}
+        previous_runtime: dict[str, Any] = {}
+        changed_entries: list[Any] = []
         for entry_id, options in payload["options"].items():
+            entry = by_id[entry_id]
+            if dict(entry.options or {}) == dict(options):
+                continue
+            previous_runtime[entry_id] = getattr(entry, "runtime_data", None)
             hass.config_entries.async_update_entry(
-                by_id[entry_id], options=deepcopy(options)
+                entry, options=deepcopy(options)
             )
-        await _reload_homekit_entries(hass, entries, rollback=True)
+            changed_entries.append(entry)
+        if changed_entries:
+            await _reload_homekit_entries(
+                hass,
+                changed_entries,
+                previous_runtime=previous_runtime,
+                rollback=True,
+            )
     else:
         await _save_matter_config(config, payload["config"])
         await _wait_matter_runtime(config, payload["entities"])

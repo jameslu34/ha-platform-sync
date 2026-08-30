@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .const import (
@@ -14,6 +15,7 @@ from .const import (
     CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION,
     CONF_LOCKED_RULES,
     CONF_MATTER_HOST,
+    CONF_MATTER_PASSWORD,
     CONF_MATTER_PORT,
     CONF_SOURCE_DASHBOARD,
     CONF_SOURCE_ENTITIES,
@@ -25,6 +27,7 @@ from .const import (
     DEFAULT_ENABLED,
     DEFAULT_GOOGLE_CONFIG_PATH,
     DEFAULT_MATTER_HOST,
+    DEFAULT_MATTER_PASSWORD,
     DEFAULT_MATTER_PORT,
     DEFAULT_SOURCE_DASHBOARD,
     DEFAULT_SOURCE_VIEW,
@@ -47,6 +50,7 @@ class SyncConfig:
     targets: frozenset[TargetPlatform]
     matter_host: str
     matter_port: int
+    matter_password: str = field(repr=False)
     google_config_path: str
     homekit_source_entry_ids: tuple[str, ...]
     homekit_managed_entry_ids: tuple[str, ...]
@@ -57,8 +61,7 @@ class SyncConfig:
     @classmethod
     def from_entry(cls, data: Mapping[str, Any], options: Mapping[str, Any]) -> "SyncConfig":
         """Merge immutable policy data with user-editable options."""
-        merged = dict(data)
-        merged.update(options)
+        merged = merge_entry_settings(data, options)
         source = SourceKind(merged.get(CONF_SOURCE_KIND, SourceKind.DASHBOARD))
         raw_targets = merged.get(CONF_TARGET_PLATFORMS, [item.value for item in ALL_TARGETS])
         targets = frozenset(TargetPlatform(item) for item in raw_targets)
@@ -93,6 +96,9 @@ class SyncConfig:
             targets=targets,
             matter_host=str(merged.get(CONF_MATTER_HOST, DEFAULT_MATTER_HOST)),
             matter_port=int(merged.get(CONF_MATTER_PORT, DEFAULT_MATTER_PORT)),
+            matter_password=str(
+                merged.get(CONF_MATTER_PASSWORD, DEFAULT_MATTER_PASSWORD)
+            ),
             google_config_path=str(merged.get(CONF_GOOGLE_CONFIG_PATH, DEFAULT_GOOGLE_CONFIG_PATH)),
             homekit_source_entry_ids=homekit_source_entry_ids,
             homekit_managed_entry_ids=normalize_config_entry_ids(
@@ -104,6 +110,50 @@ class SyncConfig:
                 data.get(CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION, False)
             ),
         )
+
+
+def merge_entry_settings(
+    data: Mapping[str, Any], options: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return the effective complete settings without losing partial rules.
+
+    Home Assistant replaces an Options Flow payload as one complete object.
+    Older releases and hand-edited entries can nevertheless contain only part
+    of the nested ``user_rules`` mapping in ``options``.  A shallow ``dict``
+    update would then erase the other platforms that still exist in ``data``.
+    Merge each platform and operation by presence so an explicit empty list
+    clears a rule, while an absent key inherits the stored value.
+    """
+    merged = deepcopy(dict(data))
+    for key, value in options.items():
+        if key != CONF_USER_RULES:
+            merged[key] = deepcopy(value)
+
+    data_rules = data.get(CONF_USER_RULES)
+    option_rules = options.get(CONF_USER_RULES)
+    data_mapping = data_rules if isinstance(data_rules, Mapping) else {}
+    option_mapping = option_rules if isinstance(option_rules, Mapping) else {}
+    rules: dict[str, dict[str, list[str]]] = {}
+    for platform in TargetPlatform:
+        data_platform = data_mapping.get(platform.value)
+        option_platform = option_mapping.get(platform.value)
+        data_platform_mapping = (
+            data_platform if isinstance(data_platform, Mapping) else {}
+        )
+        option_platform_mapping = (
+            option_platform if isinstance(option_platform, Mapping) else {}
+        )
+        rules[platform.value] = {}
+        for operation in ("include", "exclude"):
+            if operation in option_platform_mapping:
+                raw = option_platform_mapping[operation]
+            elif operation in data_platform_mapping:
+                raw = data_platform_mapping[operation]
+            else:
+                raw = []
+            rules[platform.value][operation] = sorted(normalize_entities(raw))
+    merged[CONF_USER_RULES] = rules
+    return merged
 
 
 def normalize_config_entry_ids(

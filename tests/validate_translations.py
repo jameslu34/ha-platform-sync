@@ -25,6 +25,7 @@ CONFIG_STEP_FIELDS = {
         "homekit_managed_entry_ids",
         "matter_host",
         "matter_port",
+        "matter_password",
         "google_include",
         "google_exclude",
         "homekit_include",
@@ -51,11 +52,14 @@ EXPECTED_ERRORS = {
     "invalid_target",
     "invalid_path",
     "homekit_entry_required",
+    "homekit_target_entry_not_found",
+    "homekit_target_configuration_invalid",
     "homekit_source_entry_required",
     "homekit_source_entry_not_found",
     "homekit_source_entry_unavailable",
     "homekit_source_filter_unsupported",
     "invalid_port",
+    "invalid_matter_endpoint",
     "include_exclude_conflict",
     "protected_rule_conflict",
     "google_setup_required",
@@ -341,7 +345,7 @@ def main() -> None:
 
     manifest = load_json(COMPONENT / "manifest.json")
     assert manifest["name"] == "Cross-Platform Device Sync"
-    assert manifest["version"] == "0.6.2"
+    assert manifest["version"] == "0.6.3"
 
     config_source = (COMPONENT / "config_flow.py").read_text(encoding="utf-8")
     ast.parse(config_source)
