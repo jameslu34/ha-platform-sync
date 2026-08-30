@@ -309,11 +309,11 @@ Bridge／Accessory。
 - 選填的「HomeKit 排除」
 
 只會更新您在此處明確勾選且由 UI 建立的 HomeKit Bridge／Accessory；匯入的
-Accessory 固定為唯讀。作為來源的 HomeKit 項目，不會因為被選為來源就自動取得
+單實體側項目固定為唯讀。作為來源的 HomeKit 項目，不會因為被選為來源就自動取得
 修改權限。
 若要讓外掛長期自動更新，主 HomeKit Bridge 必須透過 Home Assistant UI 建立。
-YAML 管理的項目仍可作為唯讀來源，也能以「固定、精確、單一實體且採
-Accessory 模式」留在受管理目標配置中；外掛不會改寫這類匯入 Accessory，避免
+YAML 管理的項目仍可作為唯讀來源，也能以「固定且精確的匯入單實體側項目」留在
+受管理目標配置中，不受儲存的 HomeKit 模式影響；外掛不會改寫這類匯入項目，避免
 Home Assistant 重啟後又被 YAML 覆寫回去。
 
 ### Matterbridge
@@ -553,9 +553,9 @@ Home Assistant 標籤。
 請先在 Home Assistant 建立並配對 HomeKit Bridge／Accessory，再回到此外掛
 設定中選取。外掛不會代替使用者建立或完成 Apple 家庭配對。
 
-若主 Bridge 由 YAML 管理，請改用 Home Assistant UI 重新建立。匯入的單實體項目
-只有採 Accessory 模式時可以固定留在已選配置中；若要更換或移除，必須自行修改
-HomeKit YAML；外掛不會套用重啟後就會消失的匯入 Accessory 暫時變更。
+若主 Bridge 由 YAML 管理，請改用 Home Assistant UI 重新建立。匯入的單實體側項目
+可以固定留在已選配置中，不受儲存的 HomeKit 模式影響；若要更換或移除，必須自行
+修改 HomeKit YAML；外掛不會套用重啟後就會消失的匯入項目暫時變更。
 
 ### Google Home 顯示尚未設定完成
 

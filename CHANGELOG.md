@@ -11,22 +11,22 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Never write a YAML/import-owned HomeKit Accessory during rollback. If an
-  imported Accessory changes after backup, writable entries are still restored
+- Never write a YAML/import-owned HomeKit side entry during rollback. If an
+  imported side entry changes after backup, writable entries are still restored
   and the rollback is reported as incomplete instead of overwriting YAML-owned
   state.
-- Require every fixed imported HomeKit side target to use Accessory mode, and
-  clarify in the English and Traditional Chinese setup UI which selected
-  targets are writable or fixed and read-only.
+- Keep fixed imported single-entity HomeKit side targets compatible regardless
+  of their stored HomeKit mode, and clarify in the English and Traditional
+  Chinese setup UI which selected targets are writable or fixed and read-only.
 
 ## [0.6.4] - 2026-08-30
 
 ### Fixed
 
-- Allow an exact YAML/import-managed single-entity HomeKit Accessory to remain
+- Allow an exact YAML/import-managed single-entity HomeKit side entry to remain
   as a fixed member of a target layout while requiring the writable main Bridge
   to be UI-managed. This preserves durable mixed layouts used by existing Home
-  Assistant installations without ever rewriting YAML-owned Accessories.
+  Assistant installations without ever rewriting YAML-owned side entries.
 
 ## [0.6.3] - 2026-08-30
 

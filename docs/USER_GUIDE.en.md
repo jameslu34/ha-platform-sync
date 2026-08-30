@@ -350,9 +350,9 @@ Selecting a HomeKit entry as a source does not automatically make it a writable
 target. For durable automatic updates, choose HomeKit entries created in the
 Home Assistant UI. A YAML-managed item can still be used as a read-only source.
 It may also stay in the managed target layout only as a fixed, exact
-single-entity item in HomeKit Accessory mode; the writable main Bridge must be
-UI-created. The integration will not rewrite an imported Accessory because
-Home Assistant would restore it from YAML after a restart.
+single-entity side entry, regardless of its stored HomeKit mode; the writable
+main Bridge must be UI-created. The integration will not rewrite an imported
+side entry because Home Assistant would restore it from YAML after a restart.
 
 ### Matterbridge
 
@@ -622,10 +622,10 @@ return to this integration and select it. Cross-Platform Device Sync does not
 create an Apple Home pairing for you.
 
 If the main Bridge is YAML-managed, recreate it through the Home Assistant UI.
-An imported single-entity item in Accessory mode may remain pinned in the
-selected layout, but changing or removing it must be done in HomeKit YAML. The
-integration will not apply a temporary imported-Accessory change that would
-disappear after restart.
+An imported single-entity side entry may remain pinned in the selected layout,
+regardless of its stored HomeKit mode, but changing or removing it must be done
+in HomeKit YAML. The integration will not apply a temporary imported-entry
+change that would disappear after restart.
 
 ### Google Home setup is not ready
 

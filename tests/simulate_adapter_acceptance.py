@@ -519,7 +519,14 @@ async def check_homekit_adapter() -> int:
     imported_side_bridge = FakeEntry(
         "imported-side-bridge",
         options={
-            "filter": {"include_entities": ["switch.not_an_accessory"]},
+            "filter": {
+                "include_entities": ["switch.fixed_side"],
+                "include_domains": [],
+                "include_entity_globs": [],
+                "exclude_entities": [],
+                "exclude_domains": [],
+                "exclude_entity_globs": [],
+            },
             "homekit_mode": "bridge",
         },
         source="import",
@@ -533,26 +540,38 @@ async def check_homekit_adapter() -> int:
             "homekit_mode": "bridge",
         },
     )
-    try:
-        targets.validate_target_configuration(
-            FakeHass([multi_entity_main, imported_side_bridge]),
-            SimpleNamespace(
-                homekit_managed_entry_ids=(
-                    "multi-entity-main",
-                    "imported-side-bridge",
-                )
-            ),
-            const.TargetPlatform.HOMEKIT,
+    bridge_mode_hass = FakeHass([multi_entity_main, imported_side_bridge])
+    bridge_mode_config = SimpleNamespace(
+        homekit_managed_entry_ids=(
+            "multi-entity-main",
+            "imported-side-bridge",
         )
-    except RuntimeError as error:
-        check(
-            "Accessory mode" in str(error),
-            "An imported dedicated HomeKit target must explicitly use Accessory mode",
-        )
-    else:
-        raise AssertionError(
-            "An imported single-entity Bridge must not be accepted as a fixed Accessory"
-        )
+    )
+    targets.validate_target_configuration(
+        bridge_mode_hass,
+        bridge_mode_config,
+        const.TargetPlatform.HOMEKIT,
+    )
+    await targets._apply_homekit(
+        bridge_mode_hass,
+        bridge_mode_config,
+        frozenset(
+            {
+                "light.main_one",
+                "light.main_two",
+                "light.main_three",
+                "switch.fixed_side",
+            }
+        ),
+    )
+    check(
+        targets._homekit_mode(imported_side_bridge) == "bridge"
+        and targets._homekit_entities(imported_side_bridge)
+        == {"switch.fixed_side"}
+        and bridge_mode_hass.config_entries.updated == ["multi-entity-main"]
+        and bridge_mode_hass.config_entries.reloaded == ["multi-entity-main"],
+        "A Bridge-mode imported single-entity side target stays fixed and read-only",
+    )
 
     rollback_main = FakeEntry(
         "rollback-main",

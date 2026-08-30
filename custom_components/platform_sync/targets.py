@@ -450,15 +450,12 @@ def validate_target_configuration(
                 "The writable HomeKit main Bridge cannot be YAML/import-managed"
             )
         for entry in dedicated:
-            if _config_entry_source(entry) != "import":
-                continue
-            if _homekit_mode(entry) != "accessory":
+            if (
+                _config_entry_source(entry) == "import"
+                and len(_strict_homekit_target_entities(entry)) != 1
+            ):
                 raise RuntimeError(
-                    "A YAML/import HomeKit side target must use Accessory mode"
-                )
-            if len(_strict_homekit_target_entities(entry)) != 1:
-                raise RuntimeError(
-                    "A YAML/import HomeKit target must be a fixed single-entity Accessory"
+                    "A YAML/import HomeKit target must be a fixed single-entity side entry"
                 )
     elif platform is TargetPlatform.MATTER:
         _matter_ws_url(config)

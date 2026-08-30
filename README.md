@@ -193,10 +193,10 @@ allowlists, and competing filters never authorize an automatic restart.
   readable or writable through this integration. Writable targets that need
   automatic changes require a UI-managed main Bridge. YAML/import-managed
   entries can be read as sources and may remain in a target layout only as
-  fixed exact single-entity entries in Accessory mode; changing those
-  Accessories still belongs in HomeKit YAML because HA restores them on
-  restart. Rollback never overwrites a YAML-owned Accessory and reports an
-  incomplete recovery if that entry changed after backup.
+  fixed exact single-entity side entries, regardless of their stored HomeKit
+  mode. Changing those imported entries still belongs in HomeKit YAML because
+  HA restores them on restart. Rollback never overwrites a YAML-owned entry and
+  reports an incomplete recovery if it changed after backup.
 - **Matterbridge:** requires a compatible and reachable `matterbridge-hass`
   management interface. A host/IP or complete `ws`, `wss`, `http`, or `https`
   endpoint may be used, with an optional frontend password. The integration
