@@ -8,9 +8,10 @@
   <img src="custom_components/platform_sync/brand/icon.svg" width="160" alt="Cross-Platform Device Sync icon">
 </p>
 
-Cross-Platform Device Sync is a Home Assistant custom integration that keeps an
-exact, user-selected entity set synchronized across Google Home, HomeKit, and
-Matterbridge.
+Cross-Platform Device Sync is a Home Assistant custom integration for selecting
+a Home Assistant entity set once and continuously maintaining its exposure
+across Google Home, HomeKit, and Matterbridge. It avoids selecting and updating
+the same devices separately on every target platform.
 
 Choose devices from one or more Home Assistant dashboard views, select entities
 manually, or use the current Home Assistant-side exposure list of a supported
