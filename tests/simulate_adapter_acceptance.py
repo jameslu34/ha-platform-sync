@@ -516,6 +516,103 @@ async def check_homekit_adapter() -> int:
         "A UI-managed main Bridge can change while an exact imported Accessory stays pinned",
     )
 
+    imported_side_bridge = FakeEntry(
+        "imported-side-bridge",
+        options={
+            "filter": {"include_entities": ["switch.not_an_accessory"]},
+            "homekit_mode": "bridge",
+        },
+        source="import",
+    )
+    multi_entity_main = FakeEntry(
+        "multi-entity-main",
+        options={
+            "filter": {
+                "include_entities": ["light.main_one", "light.main_two"]
+            },
+            "homekit_mode": "bridge",
+        },
+    )
+    try:
+        targets.validate_target_configuration(
+            FakeHass([multi_entity_main, imported_side_bridge]),
+            SimpleNamespace(
+                homekit_managed_entry_ids=(
+                    "multi-entity-main",
+                    "imported-side-bridge",
+                )
+            ),
+            const.TargetPlatform.HOMEKIT,
+        )
+    except RuntimeError as error:
+        check(
+            "Accessory mode" in str(error),
+            "An imported dedicated HomeKit target must explicitly use Accessory mode",
+        )
+    else:
+        raise AssertionError(
+            "An imported single-entity Bridge must not be accepted as a fixed Accessory"
+        )
+
+    rollback_main = FakeEntry(
+        "rollback-main",
+        options={
+            "filter": {"include_entities": ["light.changed"]},
+            "homekit_mode": "bridge",
+        },
+    )
+    rollback_import = FakeEntry(
+        "rollback-import",
+        options={
+            "filter": {"include_entities": ["lock.external_change"]},
+            "homekit_mode": "accessory",
+        },
+        source="import",
+    )
+    rollback_hass = FakeHass([rollback_main, rollback_import])
+    rollback_config = SimpleNamespace(
+        homekit_managed_entry_ids=("rollback-main", "rollback-import")
+    )
+    rollback_backup = targets.TargetBackup(
+        const.TargetPlatform.HOMEKIT,
+        {
+            "options": {
+                "rollback-main": {
+                    "filter": {"include_entities": ["light.before"]},
+                    "homekit_mode": "bridge",
+                },
+                "rollback-import": {
+                    "filter": {"include_entities": ["lock.before"]},
+                    "homekit_mode": "accessory",
+                },
+            },
+            "entities": frozenset({"light.before", "lock.before"}),
+        },
+    )
+    try:
+        await targets.async_restore_target(
+            rollback_hass, rollback_config, rollback_backup
+        )
+    except RuntimeError as error:
+        check(
+            "rollback is incomplete" in str(error),
+            "Imported HomeKit drift makes rollback fail closed with an incomplete result",
+        )
+    else:
+        raise AssertionError("Imported HomeKit drift must make rollback fail closed")
+    check(
+        targets._homekit_entities(rollback_main) == {"light.before"}
+        and rollback_hass.config_entries.updated == ["rollback-main"]
+        and rollback_hass.config_entries.reloaded == ["rollback-main"],
+        "Rollback still restores the UI-managed main Bridge",
+    )
+    check(
+        targets._homekit_entities(rollback_import) == {"lock.external_change"}
+        and "rollback-import" not in rollback_hass.config_entries.updated
+        and "rollback-import" not in rollback_hass.config_entries.reloaded,
+        "Rollback never updates or reloads a drifted YAML/import Accessory",
+    )
+
     settle_entries = [
         FakeEntry("reload-fails", source="import"),
         FakeEntry("reload-finishes", source="import"),
@@ -852,7 +949,7 @@ async def check_homekit_adapter() -> int:
             raise AssertionError(
                 "Malformed managed HomeKit target filters must never look exact"
             )
-    return 51
+    return 55
 
 
 def check_matter_runtime() -> int:
@@ -1991,9 +2088,9 @@ def check_google_room_schema() -> int:
 
 
 async def check_single_switch_runtime() -> int:
-    """Version 0.6.4 has one enable switch and no sensor/button platforms."""
+    """Version 0.6.5 has one enable switch and no sensor/button platforms."""
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
-    check(manifest["version"] == "0.6.4", "Manifest version is 0.6.4")
+    check(manifest["version"] == "0.6.5", "Manifest version is 0.6.5")
     check(const.DEFAULT_ENABLED is False, "New installations default disabled")
     check(const.PLATFORMS == (), "Version 0.4 exposes no sensor/button platforms")
     check(

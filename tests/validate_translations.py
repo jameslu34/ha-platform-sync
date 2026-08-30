@@ -315,11 +315,19 @@ def main() -> None:
         assert en_fields["homekit_exclude"] == "Exclude from HomeKit"
         assert (
             en_fields["homekit_managed_entry_ids"]
-            == "Writable HomeKit target entries"
+            == "Managed HomeKit target entries"
         )
         assert zh_fields["homekit_include"] == "HomeKit 額外加入"
         assert zh_fields["homekit_exclude"] == "HomeKit 排除"
-        assert zh_fields["homekit_managed_entry_ids"] == "可更新的 HomeKit 目標項目"
+        assert zh_fields["homekit_managed_entry_ids"] == "受管理的 HomeKit 目標項目"
+        en_homekit_description = documents["en"][section]["step"][
+            "platform_settings"
+        ]["data_description"]["homekit_managed_entry_ids"]
+        zh_homekit_description = documents["zh-Hant"][section]["step"][
+            "platform_settings"
+        ]["data_description"]["homekit_managed_entry_ids"]
+        assert "fixed and read-only" in en_homekit_description
+        assert "固定唯讀" in zh_homekit_description
         assert set(documents["en"][section]["step"][first_step]["data"]) == {
             "enabled",
             "source_kind",
@@ -345,7 +353,7 @@ def main() -> None:
 
     manifest = load_json(COMPONENT / "manifest.json")
     assert manifest["name"] == "Cross-Platform Device Sync"
-    assert manifest["version"] == "0.6.4"
+    assert manifest["version"] == "0.6.5"
 
     config_source = (COMPONENT / "config_flow.py").read_text(encoding="utf-8")
     ast.parse(config_source)

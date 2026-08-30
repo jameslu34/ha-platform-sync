@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-08-30
+
+### Fixed
+
+- Never write a YAML/import-owned HomeKit Accessory during rollback. If an
+  imported Accessory changes after backup, writable entries are still restored
+  and the rollback is reported as incomplete instead of overwriting YAML-owned
+  state.
+- Require every fixed imported HomeKit side target to use Accessory mode, and
+  clarify in the English and Traditional Chinese setup UI which selected
+  targets are writable or fixed and read-only.
+
 ## [0.6.4] - 2026-08-30
 
 ### Fixed
@@ -114,7 +126,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - HACS-compatible repository structure, public documentation, and automated
   validation.
 
-[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.5...HEAD
+[0.6.5]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.1...v0.6.2

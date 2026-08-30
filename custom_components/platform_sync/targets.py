@@ -450,10 +450,13 @@ def validate_target_configuration(
                 "The writable HomeKit main Bridge cannot be YAML/import-managed"
             )
         for entry in dedicated:
-            if (
-                _config_entry_source(entry) == "import"
-                and len(_strict_homekit_target_entities(entry)) != 1
-            ):
+            if _config_entry_source(entry) != "import":
+                continue
+            if _homekit_mode(entry) != "accessory":
+                raise RuntimeError(
+                    "A YAML/import HomeKit side target must use Accessory mode"
+                )
+            if len(_strict_homekit_target_entities(entry)) != 1:
                 raise RuntimeError(
                     "A YAML/import HomeKit target must be a fixed single-entity Accessory"
                 )
@@ -1448,9 +1451,17 @@ async def async_restore_target(
         by_id = {entry.entry_id: entry for entry in entries}
         previous_runtime: dict[str, Any] = {}
         changed_entries: list[Any] = []
+        drifted_imports: list[str] = []
         for entry_id, options in payload["options"].items():
             entry = by_id[entry_id]
             if dict(entry.options or {}) == dict(options):
+                continue
+            # Imported entries are owned by HomeKit YAML. Never overwrite an
+            # external change while rolling back UI-managed entries: restore
+            # everything we still own, then report that exact rollback could
+            # not be completed without changing YAML-owned state.
+            if _config_entry_source(entry) == "import":
+                drifted_imports.append(entry_id)
                 continue
             previous_runtime[entry_id] = getattr(entry, "runtime_data", None)
             hass.config_entries.async_update_entry(
@@ -1463,6 +1474,11 @@ async def async_restore_target(
                 changed_entries,
                 previous_runtime=previous_runtime,
                 rollback=True,
+            )
+        if drifted_imports:
+            raise RuntimeError(
+                "HomeKit rollback is incomplete because one or more "
+                "YAML/import-owned Accessories changed after backup"
             )
     else:
         await _save_matter_config(config, payload["config"])

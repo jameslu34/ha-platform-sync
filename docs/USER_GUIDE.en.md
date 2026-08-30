@@ -1,6 +1,6 @@
 # Cross-Platform Device Sync: Complete User Guide
 
-> Applies to version: 0.6.4
+> Applies to version: 0.6.5
 > English name: Cross-Platform Device Sync
 > Traditional Chinese name: 裝置平台同步
 
@@ -341,18 +341,18 @@ device list.
 
 When HomeKit is selected, configure:
 
-- **Writable HomeKit target entries**
+- **Managed HomeKit target entries**
 - Optional **Always include in HomeKit**
 - Optional **Exclude from HomeKit**
 
-Only the HomeKit Bridges or Accessories selected here may be updated. Selecting
-a HomeKit entry as a source does not automatically make it a writable target.
-For durable automatic updates, choose HomeKit entries created in the Home
-Assistant UI. A YAML-managed item can still be used as a read-only source. It
-may also stay in the managed target layout only as a fixed, exact single-entity
-Accessory; the writable main Bridge must be UI-created. The integration will
-not rewrite an imported Accessory because Home Assistant would restore it from
-YAML after a restart.
+Only selected UI-managed HomeKit Bridges or Accessories may be updated.
+Selecting a HomeKit entry as a source does not automatically make it a writable
+target. For durable automatic updates, choose HomeKit entries created in the
+Home Assistant UI. A YAML-managed item can still be used as a read-only source.
+It may also stay in the managed target layout only as a fixed, exact
+single-entity item in HomeKit Accessory mode; the writable main Bridge must be
+UI-created. The integration will not rewrite an imported Accessory because
+Home Assistant would restore it from YAML after a restart.
 
 ### Matterbridge
 
@@ -517,7 +517,7 @@ You can change:
 - Target platforms
 - Per-platform additions and exclusions
 - The Google Assistant configuration file
-- Writable HomeKit target entries
+- Managed HomeKit target entries
 - Matterbridge connection settings
 
 All saved settings are repopulated when you open **Configure** again. A
@@ -622,10 +622,10 @@ return to this integration and select it. Cross-Platform Device Sync does not
 create an Apple Home pairing for you.
 
 If the main Bridge is YAML-managed, recreate it through the Home Assistant UI.
-An imported single-entity Accessory may remain pinned in the selected layout,
-but changing or removing it must be done in HomeKit YAML. The integration will
-not apply a temporary imported-Accessory change that would disappear after
-restart.
+An imported single-entity item in Accessory mode may remain pinned in the
+selected layout, but changing or removing it must be done in HomeKit YAML. The
+integration will not apply a temporary imported-Accessory change that would
+disappear after restart.
 
 ### Google Home setup is not ready
 
@@ -723,7 +723,7 @@ to Google Home, HomeKit, and Matterbridge.
    `lovelace / default-view`.
 5. Select Google Home, HomeKit, and Matterbridge as targets.
 6. Enter the Google Assistant device configuration file.
-7. Select the writable HomeKit target entries.
+7. Select the managed HomeKit target entries.
 8. Enter the Matterbridge endpoint, port, and optional password.
 9. Add per-platform additions or exclusions if needed.
 10. Review and submit the final page.
