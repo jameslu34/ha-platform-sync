@@ -52,6 +52,10 @@ from .homekit_pairing import (
     pairing_requirements_markdown,
 )
 from .models import SourceSnapshot, TargetPlan, evaluate_target
+from .notifications import (
+    async_create_native_notification,
+    async_dismiss_native_notification,
+)
 from .sources import async_find_apple_tv_entities, async_read_source
 from .targets import (
     GOOGLE_SYNC_TIMEOUT,
@@ -538,20 +542,14 @@ class PlatformSyncManager:
     def _publish_pairing_requirements(
         self, requirements: list[ManualPairingRequirement]
     ) -> None:
-        """Maintain one aggregate, secret-free setup-completion notification."""
-        try:
-            from homeassistant.components import persistent_notification
-        except ImportError:
-            _LOGGER.warning("Persistent notifications are unavailable")
-            return
-
+        """Maintain one aggregate, HA-native setup-completion notification."""
         notification_id = (
             f"{DOMAIN}_{getattr(self._entry, 'entry_id', 'runtime')}_manual_pairing"
         )
         if not requirements:
-            persistent_notification.async_dismiss(self.hass, notification_id)
+            async_dismiss_native_notification(self.hass, notification_id)
             return
-        persistent_notification.async_create(
+        async_create_native_notification(
             self.hass,
             pairing_requirements_markdown(
                 requirements, zh_hant=self._is_zh_hant()
@@ -565,19 +563,14 @@ class PlatformSyncManager:
         )
 
     def _publish_homekit_restart_requirement(self, required: bool) -> None:
-        """Keep a durable owner-visible warning until HA Core restarts."""
-        try:
-            from homeassistant.components import persistent_notification
-        except ImportError:
-            _LOGGER.warning("Persistent notifications are unavailable")
-            return
+        """Keep a native persistent warning until HA Core restarts."""
         notification_id = (
             f"{DOMAIN}_{getattr(self._entry, 'entry_id', 'runtime')}_homekit_restart"
         )
         if not required:
-            persistent_notification.async_dismiss(self.hass, notification_id)
+            async_dismiss_native_notification(self.hass, notification_id)
             return
-        persistent_notification.async_create(
+        async_create_native_notification(
             self.hass,
             (
                 "HomeKit accessory 的移除需要重新啟動 Home Assistant 才能確認設定與舊服務都已完全收斂；在重新啟動並重新驗證前，此外掛不會宣稱同步完成。"

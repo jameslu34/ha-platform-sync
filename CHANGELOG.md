@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Route every user-visible Platform Sync runtime notice exclusively through
+  Home Assistant's native persistent-notification component. No mobile notify
+  service, webhook, custom dashboard, or external push fallback is used when
+  the native notification component is unavailable.
+
 ## [0.7.1] - 2026-09-05
 
 ### Fixed

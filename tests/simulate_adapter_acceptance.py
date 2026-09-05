@@ -57,6 +57,9 @@ def install_stubs() -> None:
     device_registry = ModuleType("homeassistant.helpers.device_registry")
     entity_registry = ModuleType("homeassistant.helpers.entity_registry")
     components = ModuleType("homeassistant.components")
+    persistent_notification = ModuleType(
+        "homeassistant.components.persistent_notification"
+    )
     homekit = ModuleType("homeassistant.components.homekit")
     homekit.__path__ = []
     homekit_util = ModuleType("homeassistant.components.homekit.util")
@@ -122,6 +125,9 @@ def install_stubs() -> None:
     lovelace_dashboard.CONFIG_STORAGE_KEY = "lovelace.{}"
     lovelace_dashboard.CONFIG_STORAGE_KEY_DEFAULT = "lovelace"
     homekit_util.state_needs_accessory_mode = lambda _state: False
+    persistent_notification.async_create = lambda *_args, **_kwargs: None
+    persistent_notification.async_dismiss = lambda *_args, **_kwargs: None
+    components.persistent_notification = persistent_notification
     yaml_module.load_yaml = lambda _path: {}
     yaml_module.save_yaml = lambda _path, _value: None
     util.yaml = yaml_module
@@ -140,6 +146,9 @@ def install_stubs() -> None:
             "homeassistant.helpers.device_registry": device_registry,
             "homeassistant.helpers.entity_registry": entity_registry,
             "homeassistant.components": components,
+            "homeassistant.components.persistent_notification": (
+                persistent_notification
+            ),
             "homeassistant.components.homekit": homekit,
             "homeassistant.components.homekit.util": homekit_util,
             "homeassistant.components.lovelace": lovelace,

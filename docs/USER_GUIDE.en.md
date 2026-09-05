@@ -69,9 +69,13 @@ The integration does not:
 - Delete devices or entities from Home Assistant.
 - Copy dashboard card designs or layouts to another platform.
 - Create an extra sensor, button, or other Home Assistant entity.
+- Send mobile, webhook, external-service, or custom-dashboard notifications.
 
 It only manages whether a device is included in a target platform's shared
-device list.
+device list. Pairing and restart notices appear only in Home Assistant's native
+persistent-notification panel. If a custom dashboard independently mirrors all
+native persistent notifications, its own filter should exclude notification
+IDs beginning with `platform_sync_` to avoid showing those notices twice.
 
 ## What to prepare
 

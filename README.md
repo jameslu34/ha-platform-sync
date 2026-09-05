@@ -202,6 +202,13 @@ allowlists, and competing filters never authorize an automatic restart.
 
 ## Platform notes and limitations
 
+Platform Sync sends all user-visible runtime notices only through Home
+Assistant's built-in persistent notifications. It does not call mobile or
+external notify services, send webhooks, or write messages to a custom
+dashboard. A dashboard that independently mirrors HA persistent notifications
+should exclude notification IDs beginning with `platform_sync_` if duplicate
+display is not wanted.
+
 - **Google Home:** the source and target are the Home Assistant Google Assistant
   exposure configuration. The integration also checks HA's native SYNC
   serialization and the linked-user/request-sync result. Read-only `sensor` and
