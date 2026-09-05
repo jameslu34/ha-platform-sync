@@ -1,6 +1,6 @@
 # Cross-Platform Device Sync: Complete User Guide
 
-> Applies to version: 0.6.5
+> Applies to version: 0.7.0
 > English name: Cross-Platform Device Sync
 > Traditional Chinese name: 裝置平台同步
 
@@ -224,6 +224,8 @@ The final page shows:
 - The selected source
 - The selected targets
 - Selected dashboard views or HomeKit source entries
+- Devices known to require extra native-platform pairing, plus devices that
+  require a controller-side pairing check
 
 Review the summary and submit it. The integration does not change any target
 platform before this final step is submitted.
@@ -337,11 +339,21 @@ When Google Home is selected, configure:
 After a successful change, the integration asks Google Home to refresh its
 device list.
 
+Read-only sensors and binary sensors that HA's native Google classifier omits
+are reported separately and never disguised as switches. If HA rejects a
+controllable or security entity, only that entity is omitted from the effective
+Google exposure and the exact corrective action is shown in HA; other targets
+continue. A camera without native `STREAM` capability cannot become a viewable
+Google camera.
+
 ### HomeKit
 
 When HomeKit is selected, configure:
 
 - **Managed HomeKit target entries**
+- **Main HomeKit Bridge**
+- Optional **Accessories Platform Sync may create or remove**
+- Dedicated accessory YAML path when imported accessories are adopted
 - Optional **Always include in HomeKit**
 - Optional **Exclude from HomeKit**
 
@@ -367,15 +379,21 @@ When Matterbridge is selected, configure:
 When a change is needed, the integration updates the device list and restarts
 the `matterbridge-hass` plugin.
 
+Matter has no native camera or alarm-system device type. These selections stay
+available to Matterbridge so supported endpoints on the same HA device can be
+discovered, while HA reports the limitation and never claims that a Matter
+controller can show a camera feed or native alarm panel.
+
 ## Use additions and exclusions
 
 Each selected target has its own exceptions.
 
 Except for always-included devices and protected rules, every existing
 exposure on a selected target that is absent from the source is removed.
-Excluded devices stay absent even when they are in the source. Removal only
-changes integration-managed exposure settings; it does not delete a Home
-Assistant entity or remove a native platform pairing.
+Excluded devices stay absent even when they are in the source. Removal never
+deletes a Home Assistant entity. For an explicitly lifecycle-owned HomeKit
+single-device accessory, it can remove the HA Config Entry; Apple Home may
+still require its administrator to remove the unavailable tile manually.
 
 ### Always include
 
@@ -449,11 +467,18 @@ decides whether any platform needs an update.
 When **Enable synchronization** is selected, a complete check always runs after
 Home Assistant or the integration starts.
 
+The same complete check runs after the Platform Sync Config Entry is reloaded
+and after Home Assistant's global **Quick reload** (`homeassistant.reload_all`).
+If Quick reload leaves an exact, loaded HomeKit entry with a stopped runtime,
+the integration reloads only that stopped entry and verifies the complete
+layout again. It does not alter filters or pairing data during this recovery.
+
 ### When a dashboard source changes
 
 Dashboard or related entity information changes normally trigger a check
 quickly. Several changes made close together are combined to avoid repeated
-updates.
+updates. A local-only dashboard fingerprint check runs about every 15 seconds
+as a fallback; unchanged dashboards do not contact or rewrite target platforms.
 
 ### When a HomeKit source changes
 
@@ -465,9 +490,32 @@ Changes to an explicitly selected writable HomeKit target also wake an
 immediate recheck. A platform that is still starting does not block saving the
 completed settings; bounded background retries wait for it to converge.
 
+Camera, lock, supported TV/receiver/projector, and activity-remote entities
+that need HomeKit accessory mode are created as native dedicated accessories
+after the reversible platform transaction succeeds. The setup review previews
+them, and a persistent Home Assistant notification lists the exact accessories
+still requiring an Apple Home administrator to pair them. It contains no PINs
+or tokens.
+If Matterbridge enables `enableServerRvc`, separately commissionable vacuum
+server nodes are also named on the review screen and in the notification.
+Check each one in Matterbridge's **Devices** panel and scan its QR code only if
+it is not already paired. The integration reads neither QR/PIN data nor a
+reliable controller-fabric pairing state.
+
+An accessory removal requires two identical source and candidate observations
+at least 15 seconds apart. Only entries explicitly granted lifecycle ownership
+can be removed; the main Bridge, HomeKit sources, unrelated accessories, and
+protected Apple TV entities are never pruned. Imported accessories additionally
+require an exact dedicated YAML match, backup, and readback.
+The dedicated file cannot be `configuration.yaml`; a wrong path, absent or
+ambiguous name/port/entity block, or identity change stops before Config Entry
+removal. If Home Assistant reports that a restart is required, that condition
+is stored durably and synchronization is not called complete until a new Core
+process starts.
+
 ### When Google Home or Matterbridge is the source
 
-The integration checks the device list about every 15 seconds. Synchronization
+The integration checks the device list about every 60 seconds. Synchronization
 starts only when it detects a change.
 
 ### Automatic Matterbridge recovery
@@ -495,12 +543,17 @@ manually.
 
 ### When nothing changed
 
-The integration records that no change is needed. It does not:
+Stable periodic audits record that no change is needed. They do not:
 
 - Send another refresh request to Google Home
 - Reload HomeKit
 - Reload Matterbridge
 - Control any device
+
+A manual sync, startup, reload, or newly detected source generation still
+validates Google's native payload, sends one Request Sync, and validates the
+payload again. This is intentional because a locally unchanged YAML list does
+not prove that Google Home has refreshed it.
 
 ## Change your settings
 
@@ -617,15 +670,26 @@ dashboard and page URL paths.
 
 ### No writable HomeKit target is available
 
-Create and pair a HomeKit Bridge or Accessory in Home Assistant first, then
-return to this integration and select it. Cross-Platform Device Sync does not
-create an Apple Home pairing for you.
+Create the main HomeKit Bridge in Home Assistant first, then return to this
+integration and select it. Cross-Platform Device Sync can create native,
+dedicated Config Entries for new accessory-mode devices, but an Apple Home
+administrator must complete the final pairing. The review screen and a
+persistent, secret-free notification list every device requiring that action.
+An unpaired main Bridge is listed once; normal endpoints inside that Bridge do
+not require per-device pairing, while each dedicated side accessory is paired
+separately.
+
+If the review lists a Matter vacuum, check that separate server node in the
+Matterbridge **Devices** panel. Do nothing when it is already paired; scan the
+QR code only when it is not. Normal devices behind the Matter Bridge do not
+need per-device pairing.
 
 If the main Bridge is YAML-managed, recreate it through the Home Assistant UI.
-An imported single-entity side entry may remain pinned in the selected layout,
-regardless of its stored HomeKit mode, but changing or removing it must be done
-in HomeKit YAML. The integration will not apply a temporary imported-entry
-change that would disappear after restart.
+Automatic removal of an existing imported single-entity accessory requires an
+explicit lifecycle grant and the safe relative path of its dedicated HomeKit
+YAML include file. The integration changes it only after name, port, and single
+entity match exactly and backup/readback succeeds. Other YAML entries remain
+read-only.
 
 ### Google Home setup is not ready
 
@@ -636,6 +700,13 @@ Check that:
 - `expose_by_default: false` is configured.
 - A dedicated Google Assistant device configuration file is used.
 - The file setting is a relative path, not a full disk path.
+
+After the Google account is linked once, normal devices do not require
+per-device pairing. A `sensor` or `binary_sensor` for which the installed Home
+Assistant Google classifier exposes no native trait is counted separately as
+platform-unsupported and is never mixed into the pairing list or disguised as
+a switch. Cameras, locks, security systems, and other controllable devices
+remain strict: a missing native payload device prevents a successful result.
 
 ### Matterbridge cannot be reached
 
@@ -724,9 +795,13 @@ to Google Home, HomeKit, and Matterbridge.
 5. Select Google Home, HomeKit, and Matterbridge as targets.
 6. Enter the Google Assistant device configuration file.
 7. Select the managed HomeKit target entries.
-8. Enter the Matterbridge endpoint, port, and optional password.
-9. Add per-platform additions or exclusions if needed.
-10. Review and submit the final page.
+8. Explicitly select the main HomeKit Bridge from those entries.
+9. Grant lifecycle authority only to single-device accessories that Platform
+   Sync may create or remove. If any are imported, provide the dedicated YAML
+   include file's relative path.
+10. Enter the Matterbridge endpoint, port, and optional password.
+11. Add per-platform additions or exclusions if needed.
+12. Review the additional-pairing list and submit the final page.
 
 After setup:
 

@@ -88,6 +88,7 @@ def install_stubs() -> dict[str, int]:
 
     homeassistant = ModuleType("homeassistant")
     config_entries = ModuleType("homeassistant.config_entries")
+    ha_const = ModuleType("homeassistant.const")
     core = ModuleType("homeassistant.core")
     helpers = ModuleType("homeassistant.helpers")
     entity_registry = ModuleType("homeassistant.helpers.entity_registry")
@@ -125,6 +126,9 @@ def install_stubs() -> dict[str, int]:
 
     config_entries.ConfigFlow = ConfigFlow
     config_entries.OptionsFlowWithReload = OptionsFlowWithReload
+    ha_const.CONF_ENTITY_ID = "entity_id"
+    ha_const.CONF_PORT = "port"
+    ha_const.EntityStateAttribute = SimpleNamespace(FRIENDLY_NAME="friendly_name")
     core.callback = lambda function: function
     entity_registry.async_get = lambda hass: hass.entity_registry
     helpers.entity_registry = entity_registry
@@ -144,6 +148,7 @@ def install_stubs() -> dict[str, int]:
             "voluptuous": vol,
             "homeassistant": homeassistant,
             "homeassistant.config_entries": config_entries,
+            "homeassistant.const": ha_const,
             "homeassistant.core": core,
             "homeassistant.helpers": helpers,
             "homeassistant.helpers.entity_registry": entity_registry,
@@ -194,10 +199,15 @@ async def _read_source(_hass: Any, sync_config: Any):
     return models.SourceSnapshot(frozenset({"light.platform_source"}))
 
 
+async def _find_apple_tv_entities(_hass: Any):
+    return frozenset()
+
+
 sources_stub.EmptyDashboardSourceError = _EmptyDashboardSourceError
 sources_stub.async_read_dashboard_source = _read_dashboard_source
 sources_stub.async_read_dashboard_sources = _read_dashboard_sources
 sources_stub.async_read_source = _read_source
+sources_stub.async_find_apple_tv_entities = _find_apple_tv_entities
 sys.modules["custom_components.platform_sync.sources"] = sources_stub
 
 
@@ -290,9 +300,23 @@ def _validate_target_configuration(_hass: Any, sync_config: Any, platform: Any):
             if str((entry.options or {}).get("homekit_mode", "bridge")).casefold()
             != "accessory"
         ]
-        if len(bridges) != 1 or str(
-            getattr(bridges[0], "source", "")
-        ).casefold() == "import":
+        if len(bridges) == 1:
+            main = bridges[0]
+        else:
+            multi_entity = [
+                entry
+                for entry in selected
+                if len(
+                    (entry.options or {})
+                    .get("filter", {})
+                    .get("include_entities", [])
+                )
+                > 1
+            ]
+            if len(multi_entity) != 1:
+                raise RuntimeError("ambiguous HomeKit main target")
+            main = multi_entity[0]
+        if str(getattr(main, "source", "")).casefold() == "import":
             raise RuntimeError("YAML/import HomeKit main target")
     elif platform is const.TargetPlatform.MATTER:
         host = str(sync_config.matter_host).strip().casefold()
@@ -305,6 +329,12 @@ async def _read_target(_hass: Any, _config: Any, _platform: Any):
     return frozenset({"light.target"})
 
 
+async def _matter_manual_pairing_entities(_config: Any, _desired: frozenset[str]):
+    return SimpleNamespace(
+        entities=frozenset(), controller_pairing_verified=False
+    )
+
+
 async def _validate_target(
     _hass: Any, _config: Any, _platform: Any, _expected: frozenset[str]
 ):
@@ -312,8 +342,48 @@ async def _validate_target(
     return {"loaded": True}
 
 
+def _homekit_new_accessory_mode_entities(
+    _hass: Any, _config: Any, _desired: frozenset[str]
+):
+    return frozenset()
+
+
+def _homekit_managed_main_entry_id(_hass: Any, sync_config: Any) -> str:
+    available = {
+        entry.entry_id: entry
+        for entry in _hass.config_entries.async_entries("homekit")
+    }
+    selected = [
+        available[entry_id] for entry_id in sync_config.homekit_managed_entry_ids
+    ]
+    multi_entity = [
+        entry
+        for entry in selected
+        if len((entry.options or {}).get("filter", {}).get("include_entities", []))
+        > 1
+    ]
+    if len(multi_entity) == 1:
+        return multi_entity[0].entry_id
+    bridges = [
+        entry
+        for entry in selected
+        if str((entry.options or {}).get("homekit_mode", "bridge")).casefold()
+        != "accessory"
+    ]
+    if len(bridges) != 1:
+        raise RuntimeError("ambiguous HomeKit main Bridge")
+    return bridges[0].entry_id
+
+
 targets_stub.async_read_target = _read_target
+targets_stub.async_matter_manual_pairing_entities = (
+    _matter_manual_pairing_entities
+)
 targets_stub.async_validate_target = _validate_target
+targets_stub.homekit_new_accessory_mode_entities = (
+    _homekit_new_accessory_mode_entities
+)
+targets_stub.homekit_managed_main_entry_id = _homekit_managed_main_entry_id
 targets_stub.EmptyHomeKitSourceError = _EmptyHomeKitSourceError
 targets_stub.HomeKitSourceEntryMissingError = _HomeKitSourceEntryMissingError
 targets_stub.HomeKitSourceEntryUnavailableError = (
@@ -348,6 +418,13 @@ class FakeStates:
     def async_entity_ids(self) -> list[str]:
         return sorted(self._entity_ids)
 
+    def get(self, entity_id: str) -> Any:
+        if entity_id not in self._entity_ids:
+            return None
+        return SimpleNamespace(
+            attributes={"friendly_name": entity_id.replace("_", " ")}
+        )
+
 
 class FakeConfigEntries:
     def __init__(self) -> None:
@@ -377,6 +454,16 @@ class FakeConfigEntries:
 
     def async_entries(self, domain: str) -> list[Any]:
         return list(self.homekit_entries) if domain == "homekit" else []
+
+    def async_get_entry(self, entry_id: str) -> Any:
+        return next(
+            (
+                entry
+                for entry in self.homekit_entries
+                if entry.entry_id == entry_id
+            ),
+            None,
+        )
 
     def async_update_entry(self, entry: Any, **updates: Any) -> None:
         self.updated.append({"entry": entry, **updates})
@@ -926,6 +1013,13 @@ async def check_disabled_and_final_save() -> None:
         "the direct disabled path performs no platform readiness reads",
     )
     check(len(flow.created_entries) == 1, "the direct disabled path saves once")
+    check(
+        flow.created_entries[0]["data"][
+            const.CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION
+        ]
+        is True,
+        "new configuration enables immutable Apple TV provenance protection",
+    )
 
     confirm_flow = new_flow(FakeHass())
     await choose_source(confirm_flow, const.SourceKind.MANUAL, enabled=True)
@@ -947,9 +1041,249 @@ async def check_disabled_and_final_save() -> None:
         not confirm_flow.created_entries,
         "enabled configuration is not saved before confirmation",
     )
+    review = await confirm_flow.async_step_confirm()
+    check(
+        "manual_pairing" in review["description_placeholders"],
+        "final review always displays the manual-pairing outcome",
+    )
     result = await confirm_flow.async_step_confirm({})
     check(result["type"] == "create_entry", "confirmation performs the save")
     check(len(confirm_flow.created_entries) == 1, "confirmation saves once")
+
+
+async def check_matter_pairing_review() -> None:
+    """Final review names separately commissionable Matter server nodes."""
+    flow = new_flow(
+        FakeHass(language="zh-Hant", entities={"vacuum.floor_robot"})
+    )
+    await choose_source(flow, const.SourceKind.MANUAL, enabled=True)
+    await flow.async_step_manual(
+        {const.CONF_SOURCE_ENTITIES: ["vacuum.floor_robot"]}
+    )
+    await flow.async_step_targets(
+        {const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.MATTER.value]}
+    )
+    result = await flow.async_step_platform_settings(
+        {
+            const.CONF_MATTER_HOST: "matterbridge.local",
+            const.CONF_MATTER_PORT: 8283,
+            const.CONF_MATTER_PASSWORD: "",
+            "matter_include": [],
+            "matter_exclude": [],
+        }
+    )
+    check(result["step_id"] == "confirm", "Matter flow reaches review")
+    review = await flow.async_step_confirm()
+    pairing = review["description_placeholders"]["manual_pairing"]
+    check(
+        "vacuum.floor_robot" in pairing
+        and "Matterbridge Devices" in pairing
+        and "若尚未配對" in pairing,
+        "review names the Matter node and presents pairing as a check",
+    )
+    check(
+        "PIN" not in pairing and "Token" not in pairing,
+        "Matter pairing review exposes no pairing secret",
+    )
+
+
+async def check_pending_homekit_pairing_review() -> None:
+    """Reopening Configure still names an unpaired created accessory."""
+    hass = FakeHass(language="zh-Hant", entities={"light.manual", "sensor.accessory"})
+    entry = SimpleNamespace(
+        title="Cross-Platform Device Sync",
+        data={},
+        options={
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+            const.CONF_SOURCE_ENTITIES: ["sensor.accessory"],
+            const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value],
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+                "homekit-main",
+                "homekit-accessory",
+            ],
+            const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS: ["homekit-accessory"],
+            const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS: ["homekit-accessory"],
+        },
+    )
+    flow = flow_module.PlatformSyncOptionsFlow()
+    flow.hass = hass
+    flow.config_entry = entry
+    await flow.async_step_init()
+    pairing = await flow._manual_pairing_preview()
+    check(
+        "sensor.accessory" in pairing and "Apple Home" in pairing,
+        "review merges persisted unpaired HomeKit accessories with the new plan",
+    )
+
+
+async def check_existing_homekit_accessory_pairing_review() -> None:
+    """The review finds selected side accessories even without a pending ledger."""
+    hass = FakeHass(language="zh-Hant", entities={"sensor.accessory"})
+    accessory = hass.config_entries.async_get_entry("homekit-accessory")
+    accessory.runtime_data = SimpleNamespace(
+        homekit=SimpleNamespace(
+            driver=SimpleNamespace(
+                state=SimpleNamespace(paired_clients={})
+            )
+        )
+    )
+    entry = SimpleNamespace(
+        title="Cross-Platform Device Sync",
+        data={},
+        options={
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+            const.CONF_SOURCE_ENTITIES: ["sensor.accessory"],
+            const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value],
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+                "homekit-main",
+                "homekit-accessory",
+            ],
+            const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS: ["homekit-accessory"],
+            const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS: [],
+        },
+    )
+    flow = flow_module.PlatformSyncOptionsFlow()
+    flow.hass = hass
+    flow.config_entry = entry
+    await flow.async_step_init()
+    pairing = await flow._manual_pairing_preview()
+    check(
+        "sensor.accessory" in pairing and "額外配對" in pairing,
+        "an existing selected unpaired accessory is listed without relying on a pending ledger",
+    )
+
+    accessory.runtime_data.homekit.driver.state.paired_clients = {
+        "private-controller-id": object()
+    }
+    paired_review = await flow._manual_pairing_preview()
+    check(
+        "sensor.accessory" not in paired_review,
+        "a natively paired accessory is omitted without exposing controller identity",
+    )
+
+
+async def check_homekit_main_bridge_pairing_review() -> None:
+    """The one-time main Bridge pairing is visible and not called an accessory."""
+    hass = FakeHass(language="zh-Hant", entities={"sensor.accessory"})
+    main = hass.config_entries.async_get_entry("homekit-main")
+    main.runtime_data = SimpleNamespace(
+        homekit=SimpleNamespace(
+            driver=SimpleNamespace(
+                state=SimpleNamespace(paired_clients={})
+            )
+        )
+    )
+    accessory = hass.config_entries.async_get_entry("homekit-accessory")
+    accessory.runtime_data = SimpleNamespace(
+        homekit=SimpleNamespace(
+            driver=SimpleNamespace(
+                state=SimpleNamespace(paired_clients={"paired": object()})
+            )
+        )
+    )
+    entry = SimpleNamespace(
+        title="Cross-Platform Device Sync",
+        data={},
+        options={
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+            const.CONF_SOURCE_ENTITIES: ["sensor.accessory"],
+            const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value],
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+                "homekit-main",
+                "homekit-accessory",
+            ],
+            const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS: ["homekit-accessory"],
+            const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS: [],
+        },
+    )
+    flow = flow_module.PlatformSyncOptionsFlow()
+    flow.hass = hass
+    flow.config_entry = entry
+    await flow.async_step_init()
+    pairing = await flow._manual_pairing_preview()
+    check(
+        "Main Bridge" in pairing
+        and "HomeKit Bridge" in pairing
+        and "額外配對" in pairing,
+        "the unpaired selected main Bridge is listed as one Bridge-level action",
+    )
+
+    main.runtime_data.homekit.driver.state.paired_clients = {"paired": object()}
+    paired_review = await flow._manual_pairing_preview()
+    check(
+        "Main Bridge" not in paired_review,
+        "an already paired main Bridge is omitted from owner work",
+    )
+
+
+async def check_remote_source_keeps_known_pairing_review() -> None:
+    """A deferred remote source never hides a durable known pairing item."""
+    hass = FakeHass(language="zh-Hant", entities={"sensor.accessory"})
+    accessory = hass.config_entries.async_get_entry("homekit-accessory")
+    accessory.runtime_data = SimpleNamespace(
+        homekit=SimpleNamespace(
+            driver=SimpleNamespace(
+                state=SimpleNamespace(paired_clients={})
+            )
+        )
+    )
+    entry = SimpleNamespace(
+        title="Cross-Platform Device Sync",
+        data={},
+        options={
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.GOOGLE.value,
+            const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value],
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+                "homekit-main",
+                "homekit-accessory",
+            ],
+            const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS: ["homekit-accessory"],
+            const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS: ["homekit-accessory"],
+        },
+    )
+    flow = flow_module.PlatformSyncOptionsFlow()
+    flow.hass = hass
+    flow.config_entry = entry
+    await flow.async_step_init()
+    pairing = await flow._manual_pairing_preview()
+    check(
+        "sensor.accessory" in pairing and "首次同步" in pairing,
+        "a Google/Matter source deferral is appended after known pending devices instead of replacing them",
+    )
+
+
+async def check_removed_homekit_pending_is_not_prompted() -> None:
+    """An accessory absent from the submitted exact plan needs removal, not pairing."""
+    hass = FakeHass(language="zh-Hant", entities={"light.manual", "sensor.accessory"})
+    entry = SimpleNamespace(
+        title="Cross-Platform Device Sync",
+        data={},
+        options={
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+            const.CONF_SOURCE_ENTITIES: ["light.manual"],
+            const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value],
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+                "homekit-main",
+                "homekit-accessory",
+            ],
+            const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS: ["homekit-accessory"],
+            const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS: ["homekit-accessory"],
+        },
+    )
+    flow = flow_module.PlatformSyncOptionsFlow()
+    flow.hass = hass
+    flow.config_entry = entry
+    await flow.async_step_init()
+    pairing = await flow._manual_pairing_preview()
+    check(
+        "sensor.accessory" not in pairing,
+        "a pending accessory excluded by the submitted exact plan is not falsely presented as owner pairing work",
+    )
 
 
 async def check_runtime_readiness_is_deferred() -> None:
@@ -1299,6 +1633,8 @@ async def check_options_complete_persistence() -> None:
             "homekit-main",
             "homekit-accessory",
         ],
+        const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS: ["not-managed"],
+        const.CONF_HOMEKIT_ACCESSORY_CONFIG_PATH: "../homekit.yaml",
         const.CONF_MATTER_HOST: "192.0.2.44",
         const.CONF_MATTER_PORT: 9123,
         const.CONF_MATTER_PASSWORD: "test-front-end-password",
@@ -1313,6 +1649,13 @@ async def check_options_complete_persistence() -> None:
     check(
         result["errors"].get(const.CONF_GOOGLE_CONFIG_PATH) == "invalid_path",
         "invalid Google path redraws the platform form",
+    )
+    check(
+        result["errors"].get(const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS)
+        == "homekit_lifecycle_invalid"
+        and result["errors"].get(const.CONF_HOMEKIT_ACCESSORY_CONFIG_PATH)
+        == "invalid_path",
+        "lifecycle deletion authority is limited to managed entries and a safe YAML path",
     )
     check(
         schema_default(result, const.CONF_GOOGLE_CONFIG_PATH) == "../bad.yaml"
@@ -1330,6 +1673,12 @@ async def check_options_complete_persistence() -> None:
     valid_input[const.CONF_GOOGLE_CONFIG_PATH] = (
         "google_assistant_entity_config.yaml"
     )
+    valid_input[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS] = [
+        "homekit-accessory"
+    ]
+    valid_input[const.CONF_HOMEKIT_ACCESSORY_CONFIG_PATH] = (
+        "homekit_accessories.yaml"
+    )
     result = await options_flow.async_step_platform_settings(valid_input)
     check(result["step_id"] == "confirm", "corrected settings reach confirmation")
     saved_result = await options_flow.async_step_confirm({})
@@ -1339,6 +1688,10 @@ async def check_options_complete_persistence() -> None:
         == "google_assistant_entity_config.yaml"
         and saved[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
         == ["homekit-main", "homekit-accessory"]
+        and saved[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS]
+        == ["homekit-accessory"]
+        and saved[const.CONF_HOMEKIT_ACCESSORY_CONFIG_PATH]
+        == "homekit_accessories.yaml"
         and saved[const.CONF_MATTER_HOST] == "192.0.2.44"
         and saved[const.CONF_MATTER_PORT] == 9123
         and saved[const.CONF_MATTER_PASSWORD]
@@ -1492,11 +1845,65 @@ async def check_options_complete_persistence() -> None:
     )
 
 
+async def check_options_lifecycle_optimistic_merge() -> None:
+    """A concurrent lifecycle update cannot be erased by an open flow."""
+    hass = FakeHass()
+    entry = SimpleNamespace(
+        title="Cross-Platform Device Sync",
+        data={},
+        options={
+            const.CONF_ENABLED: True,
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+            const.CONF_SOURCE_ENTITIES: ["light.manual"],
+            const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value],
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+                "homekit-main",
+                "homekit-accessory",
+            ],
+            const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS: ["homekit-accessory"],
+            const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS: [],
+        },
+    )
+    flow = flow_module.PlatformSyncOptionsFlow()
+    flow.hass = hass
+    flow.config_entry = entry
+    await flow.async_step_init()
+
+    entry.options = {
+        **entry.options,
+        const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+            "homekit-main",
+            "homekit-accessory",
+            "homekit-concurrent",
+        ],
+        const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS: [
+            "homekit-accessory",
+            "homekit-concurrent",
+        ],
+        const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS: ["homekit-concurrent"],
+    }
+    submitted = flow._compose_user_data()
+    submitted[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS] = []
+    saved = flow._finish(submitted)["data"]
+    check(
+        set(saved[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS])
+        == {"homekit-main", "homekit-accessory", "homekit-concurrent"},
+        "OptionsFlow preserves a concurrently added managed accessory",
+    )
+    check(
+        saved[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS]
+        == ["homekit-concurrent"]
+        and saved[const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS]
+        == ["homekit-concurrent"],
+        "user delta removes the old owner entry without orphaning the concurrent one",
+    )
+
+
 async def main() -> None:
     check(
         flow_module.PlatformSyncConfigFlow.VERSION == 4
-        and flow_module.PlatformSyncConfigFlow.MINOR_VERSION == 3,
-        "ConfigFlow schema version is 4.3",
+        and flow_module.PlatformSyncConfigFlow.MINOR_VERSION == 4,
+        "ConfigFlow schema version is 4.4",
     )
     await check_dashboard_routes()
     await check_manual_and_platform_routes()
@@ -1504,10 +1911,17 @@ async def main() -> None:
     await check_target_selection_and_fields()
     await check_hints_and_validation()
     await check_disabled_and_final_save()
+    await check_matter_pairing_review()
+    await check_pending_homekit_pairing_review()
+    await check_existing_homekit_accessory_pairing_review()
+    await check_homekit_main_bridge_pairing_review()
+    await check_remote_source_keeps_known_pairing_review()
+    await check_removed_homekit_pending_is_not_prompted()
     await check_runtime_readiness_is_deferred()
     await check_fixed_localized_titles()
     await check_options_disable_preserves_configuration()
     await check_options_complete_persistence()
+    await check_options_lifecycle_optimistic_merge()
     print(f"PASS: {ASSERTIONS} config-flow acceptance assertions")
 
 

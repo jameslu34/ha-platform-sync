@@ -18,6 +18,11 @@ manually, or use the current Home Assistant-side exposure list of a supported
 platform. Add per-platform exceptions, then let the integration reconcile only
 when the source set changes.
 
+HomeKit devices that require a separately paired accessory (including cameras)
+are reported as `deferred_accessory_mode` and do not block synchronization to
+the other selected platforms. Pair the dedicated HomeKit accessory to complete
+their HomeKit exposure.
+
 > **What it does not synchronize:** this is not a Home Assistant backup,
 > failover, clustering, migration, or instance-to-instance replication tool.
 > It does not copy automations, history, settings, entity states, or an entire
@@ -50,7 +55,7 @@ both user guides describe the same features and setup flow.
 - Per-target always-include and exclude lists
 - A single enable switch that fully pauses monitoring and synchronization
 - Event-driven dashboard and HomeKit detection where Home Assistant supports it
-- Startup reconciliation, with a 15-second fallback poll for sources that do not
+- Startup reconciliation, with a 60-second fallback poll for remote sources that do not
   expose a suitable change event
 - Two-second event coalescing to avoid repeated writes during rapid changes
 - No-op detection when the calculated target sets are unchanged
@@ -135,8 +140,10 @@ The setup wizard shows only fields required by your earlier choices:
    needs an additional selection page.
 3. Choose one or more target platforms.
 4. Configure only the selected targets and their optional additions or
-   exclusions.
-5. Review the final summary and submit it.
+   exclusions. For HomeKit, explicitly identify the main Bridge and grant
+   lifecycle authority only to intended single-device side accessories.
+5. Review the final summary, including the devices expected to need an
+   additional native-platform pairing or controller-side check, and submit it.
 
 Every saved source and platform setting remains available for later editing.
 If a field fails validation, the other values entered on that page stay in the
@@ -159,14 +166,23 @@ In set form, the generic rule is `(source - exclusions) ∪ additions`, followed
 by compatibility and protected deployment rules. Every existing exposure that
 is outside that final set is removed from the selected target. Unselected
 targets are left unchanged. Removal changes only the integration-managed
-exposure configuration; it never deletes the Home Assistant entity or removes
-a native platform pairing.
+exposure configuration; it never deletes the Home Assistant entity. When an
+explicitly lifecycle-managed HomeKit side accessory leaves the source, the
+integration may remove its Home Assistant Config Entry, but Apple Home may
+still require the owner to remove its unavailable tile manually.
 
 Rapid source events are combined for two seconds. Every enabled configuration
 runs one full source scan when Home Assistant or the integration starts.
-Dashboard and HomeKit sources use change events where possible. Google Home and
-Matterbridge sources use a fixed 15-second fallback poll; HomeKit uses that poll
-only when its change signal is unavailable. Manual sources do not poll.
+Dashboard and HomeKit sources use change events where possible and retain a
+five-minute no-op target health reconciliation so target-side drift cannot remain
+hidden when the source does not change. Dashboard sources also compare a
+source-only fingerprint every 15 seconds because some storage-dashboard save
+paths omit the Lovelace change event; unchanged fingerprints do not read or
+write platform targets. Google Home and Matterbridge sources use
+one fixed 60-second fallback poll; HomeKit uses the same poll only when its change
+signal is unavailable. A fallback poll performs the full health reconciliation,
+so no duplicate five-minute timer is registered. Manual sources do not poll and
+use only the five-minute target health audit.
 
 When the calculated sets are unchanged, the run is a no-op. When a change is
 needed, targets are backed up and applied in Google Home → HomeKit →
@@ -187,23 +203,64 @@ allowlists, and competing filters never authorize an automatic restart.
 ## Platform notes and limitations
 
 - **Google Home:** the source and target are the Home Assistant Google Assistant
-  exposure configuration, not a direct read of the Google Home mobile app.
+  exposure configuration. The integration also checks HA's native SYNC
+  serialization and the linked-user/request-sync result. Read-only `sensor` and
+  `binary_sensor` entities for which the installed HA Google classifier has no
+  native trait are reported separately as platform-unsupported; they are not
+  disguised as switches and cannot be fixed by pairing. Locks remain native
+  `LOCK` devices, alarm control panels remain `SECURITYSYSTEM` devices, and
+  compatible cameras remain `CAMERA` devices. A selected controllable or
+  security entity that HA's native classifier rejects is omitted from the
+  effective Google exposure instead of aborting the other targets; the exact
+  entity and corrective action are shown in HA. For example, a camera without
+  HA's native `STREAM` capability cannot become a viewable Google camera and is
+  never disguised as a switch. Google Home mobile-app rendering still requires
+  controller-side acceptance and cannot be inferred from local files.
 - **HomeKit:** source and target choices are Home Assistant HomeKit Bridge or
   Accessory config entries. Accessories paired directly in Apple Home are not
   readable or writable through this integration. Writable targets that need
-  automatic changes require a UI-managed main Bridge. YAML/import-managed
+  automatic changes require an explicitly identified, UI-managed main Bridge;
+  its durable Config Entry identity prevents a later one-device layout from
+  being mistaken for a removable side accessory. YAML/import-managed
   entries can be read as sources and may remain in a target layout only as
   fixed exact single-entity side entries, regardless of their stored HomeKit
-  mode. Changing those imported entries still belongs in HomeKit YAML because
-  HA restores them on restart. Rollback never overwrites a YAML-owned entry and
-  reports an incomplete recovery if it changed after backup.
+  mode. Camera, lock, supported TV/receiver/projector, and activity-remote
+  entities that require accessory mode are created as dedicated native HomeKit
+  Config Entries after the reversible three-platform transaction succeeds.
+  The final setup screen and a persistent Home Assistant notification list the
+  exact accessories that still need pairing in Apple Home; no PIN or token is
+  included. An unpaired main Bridge is listed once; normal endpoints inside it
+  do not need per-device pairing, while each dedicated side accessory is paired
+  separately. Only side entries explicitly granted lifecycle ownership may be
+  removed automatically, and removal requires two identical source reads at
+  least 15 seconds apart. Imported side accessories additionally require a
+  configured dedicated YAML include file, an exact name/port/entity match, a
+  backup, and readback before deletion. Main Bridges, HomeKit source entries,
+  unrelated accessories, and protected Apple TV entities are never pruned. A
+  wrong or ambiguous YAML path fails before removal, and `configuration.yaml`
+  itself is never accepted as the dedicated accessory file. If Home Assistant
+  reports that removal requires restart, that state remains visible and sync
+  is not called complete until a new Core process starts.
 - **Matterbridge:** requires a compatible and reachable `matterbridge-hass`
   management interface. A host/IP or complete `ws`, `wss`, `http`, or `https`
   endpoint may be used, with an optional frontend password. The integration
   writes an exact device list and clears platform-selection label filters.
+  Device removals use a full Matterbridge process generation barrier so an old
+  aggregator endpoint cannot be accepted merely because the plugin's device
+  index changed. Normal bridged endpoints do not require per-device pairing.
+  When `enableServerRvc` creates separately commissionable vacuum nodes, the
+  setup review and HA notification name each vacuum to check in Matterbridge's
+  **Devices** panel; scan its QR only if the controller has not already paired
+  it. The management API cannot verify controller fabric membership, so this
+  remains an explicit owner check. Matter has no native camera or alarm-panel
+  device type. Such selections remain available to Matterbridge so supported
+  endpoints on the same HA device can still be discovered, but the integration
+  reports the limitation and never claims that a Matter controller can display
+  a camera feed or native alarm panel.
 - **Dashboards:** device entities are collected from selected views; card style,
   layout, ordering, and non-entity content are not synchronized.
-- **Native apps:** a successful Home Assistant-side readback does not prove that
+- **Native apps:** Google request-sync acceptance, a HomeKit Config Entry
+  readback, or a Matterbridge process-generation readback does not prove that
   Google Home, Apple Home, or another controller app has already refreshed.
 - Exact synchronization may remove an entity from a selected target's exposure
   list when it leaves the source. Review a preview and keep platform backups.
@@ -233,6 +290,8 @@ python tests/simulate_acceptance.py
 python tests/simulate_adapter_acceptance.py
 python tests/simulate_config_flow_acceptance.py
 python tests/validate_translations.py
+python tests/test_homekit_lifecycle.py
+python tests/test_homekit_pairing.py
 python -m compileall custom_components/platform_sync tests
 ```
 

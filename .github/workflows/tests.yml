@@ -23,8 +23,16 @@ jobs:
         run: python tests/simulate_acceptance.py
       - name: Run adapter and safety acceptance simulation
         run: python tests/simulate_adapter_acceptance.py
+      - name: Run HomeKit lifecycle tests
+        run: |
+          python tests/test_homekit_lifecycle.py
+          python tests/test_homekit_pairing.py
       - name: Run configuration-flow acceptance simulation
         run: python tests/simulate_config_flow_acceptance.py
+      - name: Run pure model and source tests
+        run: |
+          python tests/test_models.py
+          python tests/test_sources.py
       - name: Validate translations
         run: python tests/validate_translations.py
       - name: Compile Python sources

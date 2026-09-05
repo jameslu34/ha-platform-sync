@@ -23,6 +23,9 @@ CONFIG_STEP_FIELDS = {
     "platform_settings": {
         "google_config_path",
         "homekit_managed_entry_ids",
+        "homekit_main_entry_id",
+        "homekit_lifecycle_entry_ids",
+        "homekit_accessory_config_path",
         "matter_host",
         "matter_port",
         "matter_password",
@@ -52,6 +55,7 @@ EXPECTED_ERRORS = {
     "invalid_target",
     "invalid_path",
     "homekit_entry_required",
+    "homekit_lifecycle_invalid",
     "homekit_target_entry_not_found",
     "homekit_target_configuration_invalid",
     "homekit_source_entry_required",
@@ -350,10 +354,12 @@ def main() -> None:
         assert "既有曝光會移除" in zh_target_description
         assert "unselected targets stay unchanged" in en_confirm_description
         assert "未勾選平台維持不變" in zh_confirm_description
+        assert "{manual_pairing}" in en_confirm_description
+        assert "{manual_pairing}" in zh_confirm_description
 
     manifest = load_json(COMPONENT / "manifest.json")
     assert manifest["name"] == "Cross-Platform Device Sync"
-    assert manifest["version"] == "0.6.5"
+    assert manifest["version"] == "0.7.0"
 
     config_source = (COMPONENT / "config_flow.py").read_text(encoding="utf-8")
     ast.parse(config_source)

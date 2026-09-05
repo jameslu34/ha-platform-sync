@@ -57,8 +57,12 @@ def install_stubs() -> None:
     device_registry = ModuleType("homeassistant.helpers.device_registry")
     entity_registry = ModuleType("homeassistant.helpers.entity_registry")
     components = ModuleType("homeassistant.components")
+    homekit = ModuleType("homeassistant.components.homekit")
+    homekit.__path__ = []
+    homekit_util = ModuleType("homeassistant.components.homekit.util")
     lovelace = ModuleType("homeassistant.components.lovelace")
     lovelace_const = ModuleType("homeassistant.components.lovelace.const")
+    lovelace_dashboard = ModuleType("homeassistant.components.lovelace.dashboard")
     util = ModuleType("homeassistant.util")
     yaml_module = ModuleType("homeassistant.util.yaml")
 
@@ -83,11 +87,18 @@ def install_stubs() -> None:
         starting = object()
         running = object()
 
+    class EntityStateAttribute:
+        FRIENDLY_NAME = "friendly_name"
+
     config_entries.ConfigEntry = ConfigEntry
     config_entries.ConfigEntryChange = ConfigEntryChange
     config_entries.ConfigEntryState = ConfigEntryState
     config_entries.SIGNAL_CONFIG_ENTRY_CHANGED = "config_entry_changed"
+    const.EVENT_CALL_SERVICE = "call_service"
     const.EVENT_HOMEASSISTANT_STARTED = "homeassistant_started"
+    const.CONF_ENTITY_ID = "entity_id"
+    const.CONF_PORT = "port"
+    const.EntityStateAttribute = EntityStateAttribute
     core.HomeAssistant = object
     core.CoreState = CoreState
     core.ServiceCall = object
@@ -98,6 +109,8 @@ def install_stubs() -> None:
     )
     dispatcher.async_dispatcher_connect = lambda *_args, **_kwargs: lambda: None
     event.async_track_time_interval = lambda *_args, **_kwargs: lambda: None
+    event.async_call_later = lambda *_args, **_kwargs: lambda: None
+    device_registry.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
     entity_registry.EVENT_ENTITY_REGISTRY_UPDATED = "entity_registry_updated"
     device_registry.async_get = lambda _hass: SimpleNamespace(devices={})
     entity_registry.async_get = lambda _hass: SimpleNamespace(entities={})
@@ -106,6 +119,9 @@ def install_stubs() -> None:
     helpers.config_validation = config_validation
     helpers.dispatcher = dispatcher
     lovelace_const.EVENT_LOVELACE_UPDATED = "lovelace_updated"
+    lovelace_dashboard.CONFIG_STORAGE_KEY = "lovelace.{}"
+    lovelace_dashboard.CONFIG_STORAGE_KEY_DEFAULT = "lovelace"
+    homekit_util.state_needs_accessory_mode = lambda _state: False
     yaml_module.load_yaml = lambda _path: {}
     yaml_module.save_yaml = lambda _path, _value: None
     util.yaml = yaml_module
@@ -124,8 +140,11 @@ def install_stubs() -> None:
             "homeassistant.helpers.device_registry": device_registry,
             "homeassistant.helpers.entity_registry": entity_registry,
             "homeassistant.components": components,
+            "homeassistant.components.homekit": homekit,
+            "homeassistant.components.homekit.util": homekit_util,
             "homeassistant.components.lovelace": lovelace,
             "homeassistant.components.lovelace.const": lovelace_const,
+            "homeassistant.components.lovelace.dashboard": lovelace_dashboard,
             "homeassistant.util": util,
             "homeassistant.util.yaml": yaml_module,
         }
@@ -149,6 +168,24 @@ sources_stub.async_read_source = None
 sources_stub.async_find_apple_tv_entities = None
 sys.modules["custom_components.platform_sync.sources"] = sources_stub
 manager_module = load("custom_components.platform_sync.manager", "manager.py")
+
+
+async def _empty_matter_manual_pairing_snapshot(
+    _config: Any, _desired: frozenset[str]
+) -> Any:
+    """Keep manager-only tests local; Matter helper tests call targets directly."""
+    return targets.MatterManualPairingSnapshot(frozenset())
+
+
+manager_module.async_matter_manual_pairing_entities = (
+    _empty_matter_manual_pairing_snapshot
+)
+manager_module.google_native_unrepresentable_entities = (
+    lambda _hass, _desired: frozenset()
+)
+manager_module.matter_native_unrepresentable_entities = (
+    lambda _desired: frozenset()
+)
 integration_module = load("custom_components.platform_sync.__init__", "__init__.py")
 diagnostics_module = load(
     "custom_components.platform_sync.diagnostics", "diagnostics.py"
@@ -208,6 +245,9 @@ class FakeConfigEntries:
 class FakeHass:
     def __init__(self, entries: list[FakeEntry]) -> None:
         self.config_entries = FakeConfigEntries(entries)
+        self.states = SimpleNamespace(
+            get=lambda entity_id: SimpleNamespace(entity_id=entity_id)
+        )
 
 
 def check(condition: bool, message: str) -> None:
@@ -545,7 +585,10 @@ async def check_homekit_adapter() -> int:
         homekit_managed_entry_ids=(
             "multi-entity-main",
             "imported-side-bridge",
-        )
+        ),
+        homekit_main_entry_id="multi-entity-main",
+        homekit_source_entry_ids=(),
+        homekit_lifecycle_entry_ids=("imported-side-bridge",),
     )
     targets.validate_target_configuration(
         bridge_mode_hass,
@@ -558,8 +601,6 @@ async def check_homekit_adapter() -> int:
         frozenset(
             {
                 "light.main_one",
-                "light.main_two",
-                "light.main_three",
                 "switch.fixed_side",
             }
         ),
@@ -568,10 +609,215 @@ async def check_homekit_adapter() -> int:
         targets._homekit_mode(imported_side_bridge) == "bridge"
         and targets._homekit_entities(imported_side_bridge)
         == {"switch.fixed_side"}
+        and targets._homekit_entities(multi_entity_main) == {"light.main_one"}
         and bridge_mode_hass.config_entries.updated == ["multi-entity-main"]
         and bridge_mode_hass.config_entries.reloaded == ["multi-entity-main"],
-        "A Bridge-mode imported single-entity side target stays fixed and read-only",
+        "A main Bridge can shrink from two entities to one while a Bridge-mode side stays fixed",
     )
+    check(
+        targets.homekit_managed_main_entry_id(
+            bridge_mode_hass, bridge_mode_config
+        )
+        == "multi-entity-main",
+        "The durable ID still identifies the main Bridge after it becomes a singleton",
+    )
+    check(
+        await targets.async_read_target(
+            bridge_mode_hass,
+            bridge_mode_config,
+            const.TargetPlatform.HOMEKIT,
+        )
+        == frozenset({"light.main_one", "switch.fixed_side"}),
+        "HomeKit read uses the explicit singleton-main layout",
+    )
+    check(
+        not targets.homekit_missing_accessory_mode_entities(
+            bridge_mode_hass,
+            bridge_mode_config,
+            frozenset({"light.main_one", "switch.fixed_side"}),
+        ),
+        "HomeKit classification uses the explicit singleton-main layout",
+    )
+    bridge_runtime = await targets.async_validate_target(
+        bridge_mode_hass,
+        bridge_mode_config,
+        const.TargetPlatform.HOMEKIT,
+        frozenset({"light.main_one", "switch.fixed_side"}),
+    )
+    check(
+        bridge_runtime["managed_entries"] == 2
+        and bridge_runtime["runtime_verified_entries"] == 2,
+        "HomeKit validation preserves the explicit singleton-main layout",
+    )
+    imported_side_bridge.runtime_data.homekit.status = 3
+    try:
+        await targets.async_validate_target(
+            bridge_mode_hass,
+            bridge_mode_config,
+            const.TargetPlatform.HOMEKIT,
+            frozenset({"light.main_one", "switch.fixed_side"}),
+        )
+    except RuntimeError:
+        check(
+            True,
+            "A non-running prune candidate still fails without an explicit allowance",
+        )
+    else:
+        raise AssertionError("Non-running HomeKit runtime cannot be generally accepted")
+    pending_runtime = await targets.async_validate_target(
+        bridge_mode_hass,
+        bridge_mode_config,
+        const.TargetPlatform.HOMEKIT,
+        frozenset({"light.main_one", "switch.fixed_side"}),
+        allowed_nonrunning_homekit_entry_ids=frozenset(
+            {"imported-side-bridge"}
+        ),
+    )
+    check(
+        pending_runtime["loaded"] is True
+        and pending_runtime["runtime_verified"] is False
+        and pending_runtime["runtime_verified_entries"] == 1
+        and pending_runtime["runtime_pending_prune_entries"] == 1,
+        "A lifecycle-owned side candidate is counted as pending, never runtime-verified",
+    )
+    await targets.async_restore_target(
+        bridge_mode_hass,
+        bridge_mode_config,
+        targets.TargetBackup(
+            const.TargetPlatform.HOMEKIT,
+            {
+                "options": {
+                    entry.entry_id: deepcopy(entry.options)
+                    for entry in (multi_entity_main, imported_side_bridge)
+                },
+                "entities": frozenset(
+                    {"light.main_one", "switch.fixed_side"}
+                ),
+            },
+        ),
+        allowed_nonrunning_homekit_entry_ids=frozenset(
+            {"imported-side-bridge"}
+        ),
+    )
+    check(
+        True,
+        "HomeKit rollback validation carries the exact pending-prune runtime allowance",
+    )
+    try:
+        await targets.async_validate_target(
+            bridge_mode_hass,
+            bridge_mode_config,
+            const.TargetPlatform.HOMEKIT,
+            frozenset({"light.main_one", "switch.fixed_side"}),
+            allowed_nonrunning_homekit_entry_ids=frozenset(
+                {"multi-entity-main"}
+            ),
+        )
+    except RuntimeError as error:
+        check(
+            "Only managed HomeKit side entries" in str(error),
+            "The main Bridge can never receive a pending-prune runtime allowance",
+        )
+    else:
+        raise AssertionError("The HomeKit main Bridge runtime cannot be exempted")
+    source_overlap_config = SimpleNamespace(
+        homekit_managed_entry_ids=(
+            "multi-entity-main",
+            "imported-side-bridge",
+        ),
+        homekit_main_entry_id="multi-entity-main",
+        homekit_source_entry_ids=("imported-side-bridge",),
+        homekit_lifecycle_entry_ids=("imported-side-bridge",),
+    )
+    try:
+        await targets.async_validate_target(
+            bridge_mode_hass,
+            source_overlap_config,
+            const.TargetPlatform.HOMEKIT,
+            frozenset({"light.main_one", "switch.fixed_side"}),
+            allowed_nonrunning_homekit_entry_ids=frozenset(
+                {"imported-side-bridge"}
+            ),
+        )
+    except RuntimeError as error:
+        check(
+            "source entry cannot use" in str(error),
+            "A HomeKit source entry can never receive a pending-prune runtime allowance",
+        )
+    else:
+        raise AssertionError("A HomeKit source runtime cannot be exempted")
+    try:
+        await targets.async_read_target(
+            bridge_mode_hass,
+            SimpleNamespace(
+                homekit_managed_entry_ids=(
+                    "multi-entity-main",
+                    "imported-side-bridge",
+                )
+            ),
+            const.TargetPlatform.HOMEKIT,
+        )
+    except RuntimeError as error:
+        check(
+            "exactly one main Bridge" in str(error),
+            "Legacy singleton Bridge ambiguity fails closed instead of silently retargeting",
+        )
+    else:
+        raise AssertionError("Ambiguous legacy singleton Bridges must fail closed")
+    try:
+        targets.homekit_managed_main_entry_id(
+            bridge_mode_hass,
+            SimpleNamespace(
+                homekit_managed_entry_ids=(
+                    "multi-entity-main",
+                    "imported-side-bridge",
+                ),
+                homekit_main_entry_id="missing-main",
+                homekit_source_entry_ids=(),
+            ),
+        )
+    except RuntimeError as error:
+        check(
+            "not a managed target entry" in str(error),
+            "An explicit main ID outside the managed set fails closed",
+        )
+    else:
+        raise AssertionError("An unmanaged explicit main ID must fail closed")
+    try:
+        targets.homekit_managed_main_entry_id(
+            bridge_mode_hass,
+            SimpleNamespace(
+                homekit_managed_entry_ids=(
+                    "multi-entity-main",
+                    "imported-side-bridge",
+                ),
+                homekit_main_entry_id="multi-entity-main",
+                homekit_source_entry_ids=("multi-entity-main",),
+            ),
+        )
+    except RuntimeError as error:
+        check(
+            "cannot also be a source entry" in str(error),
+            "An explicit main/source ownership overlap fails closed",
+        )
+    else:
+        raise AssertionError("The explicit main Bridge cannot also be a source")
+    try:
+        targets.homekit_managed_main_entry_id(
+            hass,
+            SimpleNamespace(
+                homekit_managed_entry_ids=("main", "accessory"),
+                homekit_main_entry_id="accessory",
+                homekit_source_entry_ids=(),
+            ),
+        )
+    except RuntimeError as error:
+        check(
+            "configured as an Accessory" in str(error),
+            "An explicit main ID pointing at Accessory mode fails closed",
+        )
+    else:
+        raise AssertionError("An Accessory entry cannot be the explicit main Bridge")
 
     rollback_main = FakeEntry(
         "rollback-main",
@@ -661,6 +907,58 @@ async def check_homekit_adapter() -> int:
         )
     else:
         raise AssertionError("A failed HomeKit reload must propagate after siblings settle")
+
+    cancel_entry = FakeEntry("reload-during-cancel", source="import")
+    cancel_hass = FakeHass([cancel_entry])
+    reload_started = asyncio.Event()
+    reload_release = asyncio.Event()
+    reload_finished = False
+    reload_cancelled = False
+
+    async def delayed_reload(entry_id: str) -> bool:
+        nonlocal reload_finished, reload_cancelled
+        check(entry_id == cancel_entry.entry_id, "The expected HomeKit entry reloads")
+        reload_started.set()
+        try:
+            await reload_release.wait()
+        except asyncio.CancelledError:
+            reload_cancelled = True
+            raise
+        reload_finished = True
+        return True
+
+    cancel_hass.config_entries.async_reload = delayed_reload
+    reload_task = asyncio.create_task(
+        targets._reload_homekit_entries(
+            cancel_hass,
+            [cancel_entry],
+            previous_runtime={cancel_entry.entry_id: cancel_entry.runtime_data},
+        )
+    )
+    await reload_started.wait()
+    reload_task.cancel()
+    await asyncio.sleep(0)
+    check(
+        not reload_task.done() and not reload_cancelled,
+        "Caller cancellation is deferred without cancelling an active HomeKit reload",
+    )
+    reload_task.cancel()
+    await asyncio.sleep(0)
+    check(
+        not reload_task.done() and not reload_cancelled,
+        "Repeated cancellation cannot interrupt the HomeKit reload drain",
+    )
+    reload_release.set()
+    try:
+        await reload_task
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("HomeKit reload cancellation must propagate after drain")
+    check(
+        reload_finished and not reload_cancelled,
+        "HomeKit reload cancellation propagates only after the active reload settles",
+    )
 
     fail_closed_hass = FakeHass([main])
     empty_managed_config = SimpleNamespace(homekit_managed_entry_ids=())
@@ -968,7 +1266,210 @@ async def check_homekit_adapter() -> int:
             raise AssertionError(
                 "Malformed managed HomeKit target filters must never look exact"
             )
-    return 55
+
+    routing_entities = frozenset(
+        {
+            "light.keep",
+            "camera.in_main",
+            "lock.in_main",
+            "media_player.tv_in_main",
+            "remote.activity_in_main",
+        }
+    )
+    accessory_only = routing_entities - {"light.keep"}
+    routing_main = FakeEntry(
+        "routing-main",
+        options={
+            "filter": {"include_entities": sorted(routing_entities)},
+            "mode": "bridge",
+        },
+    )
+    routing_hass = FakeHass([routing_main])
+    routing_hass.states = SimpleNamespace(
+        get=lambda entity_id: SimpleNamespace(entity_id=entity_id)
+    )
+    native_classifier = sys.modules[
+        "homeassistant.components.homekit.util"
+    ].state_needs_accessory_mode
+    sys.modules[
+        "homeassistant.components.homekit.util"
+    ].state_needs_accessory_mode = lambda state: state.entity_id in {
+        "media_player.tv_in_main",
+        "remote.activity_in_main",
+    }
+    routing_config = SimpleNamespace(homekit_managed_entry_ids=(routing_main.entry_id,))
+    try:
+        check(
+            targets.homekit_missing_accessory_mode_entities(
+                routing_hass, routing_config, routing_entities
+            )
+            == accessory_only,
+            "Accessory-only entities already on the main Bridge still require migration",
+        )
+        check(
+            targets.homekit_new_accessory_mode_entities(
+                routing_hass, routing_config, routing_entities
+            )
+            == accessory_only,
+            "The compatibility classifier exposes the migration-safe missing-side set",
+        )
+        routing_options = deepcopy(routing_main.options)
+        try:
+            await targets._apply_homekit(
+                routing_hass, routing_config, routing_entities
+            )
+        except RuntimeError as error:
+            check(
+                "created or migrated" in str(error)
+                and routing_main.options == routing_options,
+                "Direct HomeKit apply cannot leave accessory-only entities on the main Bridge",
+            )
+        else:
+            raise AssertionError(
+                "Accessory-only entities on the main Bridge must be deferred before apply"
+            )
+        await targets._apply_homekit(
+            routing_hass, routing_config, routing_entities - accessory_only
+        )
+        check(
+            targets._homekit_entities(routing_main) == {"light.keep"},
+            "A manager can safely defer the missing-side set and remove it from the main Bridge",
+        )
+    finally:
+        sys.modules[
+            "homeassistant.components.homekit.util"
+        ].state_needs_accessory_mode = native_classifier
+
+    missing_state_main = FakeEntry(
+        "missing-state-main",
+        options={
+            "filter": {"include_entities": ["light.keep"]},
+            "mode": "bridge",
+        },
+    )
+    missing_state_hass = FakeHass([missing_state_main])
+    missing_state_hass.states = SimpleNamespace(get=lambda _entity_id: None)
+    missing_state_config = SimpleNamespace(
+        homekit_managed_entry_ids=(missing_state_main.entry_id,)
+    )
+    check(
+        targets.homekit_missing_accessory_mode_entities(
+            missing_state_hass,
+            missing_state_config,
+            frozenset({"camera.not_loaded", "lock.not_loaded"}),
+        )
+        == {"camera.not_loaded", "lock.not_loaded"},
+        "Camera and lock domains remain classifiable while their HA state is absent",
+    )
+    try:
+        targets.homekit_missing_accessory_mode_entities(
+            missing_state_hass,
+            missing_state_config,
+            frozenset({"media_player.not_loaded", "remote.not_loaded"}),
+        )
+    except RuntimeError as error:
+        check(
+            "requires current state" in str(error),
+            "State-dependent media-player and remote routing fails closed",
+        )
+    else:
+        raise AssertionError(
+            "Missing media-player or remote state must not be treated as Bridge-safe"
+        )
+
+    covered_main = FakeEntry(
+        "covered-main",
+        options={
+            "filter": {"include_entities": ["light.keep"]},
+            "mode": "bridge",
+        },
+    )
+    covered_accessory = FakeEntry(
+        "covered-accessory",
+        options={
+            "filter": {"include_entities": ["camera.covered"]},
+            "mode": "accessory",
+        },
+    )
+    covered_hass = FakeHass([covered_main, covered_accessory])
+    covered_hass.states = SimpleNamespace(get=lambda _entity_id: None)
+    check(
+        not targets.homekit_missing_accessory_mode_entities(
+            covered_hass,
+            SimpleNamespace(
+                homekit_managed_entry_ids=(
+                    covered_main.entry_id,
+                    covered_accessory.entry_id,
+                )
+            ),
+            frozenset({"light.keep", "camera.covered"}),
+        ),
+        "A dedicated side entry is exact accessory-mode coverage even during a state gap",
+    )
+    recovery_main = FakeEntry(
+        "recovery-main",
+        options={
+            "filter": {"include_entities": ["light.recovery"]},
+            "homekit_mode": "bridge",
+        },
+    )
+    recovery_accessory = FakeEntry(
+        "recovery-accessory",
+        options={
+            "filter": {"include_entities": ["lock.recovery"]},
+            "homekit_mode": "accessory",
+        },
+        source="user",
+        runtime_data=SimpleNamespace(homekit=SimpleNamespace(status=0)),
+    )
+    recovery_hass = FakeHass([recovery_main, recovery_accessory])
+
+    async def recover_reload(entry_id: str) -> bool:
+        check(
+            entry_id == recovery_accessory.entry_id,
+            "HomeKit recovery reloads only the stopped runtime",
+        )
+        recovery_hass.config_entries.reloaded.append(entry_id)
+        recovery_accessory.runtime_data = SimpleNamespace(
+            homekit=SimpleNamespace(status=1)
+        )
+        return True
+
+    recovery_hass.config_entries.async_reload = recover_reload
+    recovery_result = await targets.async_recover_homekit_runtime(
+        recovery_hass,
+        SimpleNamespace(
+            homekit_managed_entry_ids=(
+                recovery_main.entry_id,
+                recovery_accessory.entry_id,
+            ),
+            homekit_main_entry_id=recovery_main.entry_id,
+            homekit_source_entry_ids=(),
+            homekit_lifecycle_entry_ids=(recovery_accessory.entry_id,),
+        ),
+        frozenset({"light.recovery", "lock.recovery"}),
+    )
+    check(
+        recovery_result["runtime_recovered_entries"] == 1
+        and recovery_hass.config_entries.reloaded
+        == [recovery_accessory.entry_id],
+        "Exact loaded HomeKit layouts recover stopped runtimes by native reload",
+    )
+    homekit_util = sys.modules.pop("homeassistant.components.homekit.util")
+    try:
+        try:
+            targets.homekit_new_accessory_mode_entities(
+                FakeHass([main]),
+                SimpleNamespace(homekit_managed_entry_ids=(main.entry_id,)),
+                frozenset({"light.new"}),
+            )
+        except RuntimeError:
+            check(True, "Unavailable HomeKit classifier fails closed")
+        else:
+            raise AssertionError("Unavailable HomeKit classifier must fail closed")
+    finally:
+        sys.modules["homeassistant.components.homekit.util"] = homekit_util
+    return 78
 
 
 def check_matter_runtime() -> int:
@@ -1188,7 +1689,9 @@ async def check_matter_validation_contract() -> int:
         runtime["plugin_loaded"] is True
         and runtime["plugin_started"] is True
         and runtime["registered_devices"] == 1
-        and runtime["loaded_devices"] == 1,
+        and runtime["loaded_devices"] == 1
+        and runtime["process_generation_verified"] is False
+        and runtime["controller_verified"] is False,
         "Matter validation reports plugin lifecycle and exact device counts",
     )
     return 2
@@ -1231,6 +1734,8 @@ def matter_snapshot(
         "bridgeStatus": "Started",
         "restartRequired": False,
         "fixedRestartRequired": False,
+        "startupAt": 1_000,
+        "runningTimes": 4,
     }
     information.update(settings_updates or {})
     loaded_devices = devices
@@ -1248,7 +1753,7 @@ def matter_snapshot(
         plugin=plugin,
         plugin_config=plugin_config,
         devices=loaded_devices,
-        allowlist=frozenset({"light.one"}),
+        allowlist=frozenset(plugin_config["whiteList"]),
     )
 
 
@@ -1301,6 +1806,388 @@ def check_matter_recovery_guard() -> int:
     return 11
 
 
+async def check_matter_process_generation_barrier() -> int:
+    """A ready old process cannot satisfy a full-restart convergence wait."""
+    expected = frozenset({"light.one"})
+    old = matter_snapshot()
+    new = matter_snapshot(
+        settings_updates={"startupAt": 2_000, "runningTimes": 5}
+    )
+    snapshots = [old, new]
+    reads = 0
+
+    async def read_snapshot(_config: Any) -> Any:
+        nonlocal reads
+        reads += 1
+        return snapshots.pop(0)
+
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    originals = (
+        targets._read_matter_runtime_snapshot,
+        targets.asyncio.sleep,
+    )
+    targets._read_matter_runtime_snapshot = read_snapshot
+    targets.asyncio.sleep = no_delay
+    try:
+        runtime = await targets._wait_matter_runtime(
+            SimpleNamespace(),
+            expected,
+            timeout=1,
+            after_generation=targets.MatterProcessGeneration(1_000, 4),
+        )
+    finally:
+        (
+            targets._read_matter_runtime_snapshot,
+            targets.asyncio.sleep,
+        ) = originals
+    check(reads == 2, "A ready old process is rejected before the new generation")
+    check(
+        runtime["process_generation_verified"] is True
+        and runtime["controller_verified"] is False,
+        "Process convergence is explicit and never claims native controller readback",
+    )
+    check(
+        targets._matter_process_generation(old.settings)
+        == targets.MatterProcessGeneration(1_000, 4),
+        "Official startupAt and runningTimes fields form the process generation",
+    )
+    check(
+        targets._matter_process_generation_advanced(
+            targets.MatterProcessGeneration(2_000, 5),
+            targets.MatterProcessGeneration(1_000, 4),
+        ),
+        "Both process generation signals advancing satisfies the barrier",
+    )
+    check(
+        not targets._matter_process_generation_advanced(
+            targets.MatterProcessGeneration(2_000, 4),
+            targets.MatterProcessGeneration(1_000, 4),
+        ),
+        "A new startupAt alone cannot satisfy the generation barrier",
+    )
+    check(
+        not targets._matter_process_generation_advanced(
+            targets.MatterProcessGeneration(1_000, 5),
+            targets.MatterProcessGeneration(1_000, 4),
+        ),
+        "A higher runningTimes alone cannot satisfy the generation barrier",
+    )
+    for invalid in (
+        {"startupAt": True, "runningTimes": 5},
+        {"startupAt": 2_000, "runningTimes": "5"},
+        {"startupAt": 0, "runningTimes": 5},
+    ):
+        try:
+            targets._matter_process_generation(
+                {"matterbridgeInformation": invalid}
+            )
+        except RuntimeError:
+            check(True, "Malformed Matterbridge generation fails closed")
+        else:
+            raise AssertionError("Malformed process generation must fail closed")
+    return 9
+
+
+async def check_matter_manual_pairing_snapshot() -> int:
+    """RVC server-node guidance is secret-free and never claims pairing."""
+    desired = frozenset({"vacuum.upstairs", "light.one"})
+    enabled = True
+
+    async def request(_config: Any, command: str, payload: Any = None) -> Any:
+        check(command == "plugins", "Matter RVC pairing guidance reads plugin config")
+        return [
+            matter_snapshot(
+                config_updates={"enableServerRvc": enabled}
+            ).plugin
+        ]
+
+    original_request = targets._matter_request
+    targets._matter_request = request
+    try:
+        snapshot = await targets.async_matter_manual_pairing_entities(
+            SimpleNamespace(), desired
+        )
+        check(
+            snapshot.entities == frozenset({"vacuum.upstairs"})
+            and snapshot.controller_pairing_verified is False,
+            "Server RVC mode lists only vacuum nodes without claiming fabric pairing",
+        )
+        check(
+            "qr" not in repr(snapshot).casefold()
+            and "pin" not in repr(snapshot).casefold(),
+            "Matter manual pairing snapshot contains no QR code or PIN",
+        )
+        enabled = False
+        disabled = await targets.async_matter_manual_pairing_entities(
+            SimpleNamespace(), desired
+        )
+        check(
+            not disabled.entities
+            and disabled.controller_pairing_verified is False,
+            "Disabled server RVC mode requires no separate-node guidance",
+        )
+    finally:
+        targets._matter_request = original_request
+
+    for malformed in (None, "true", 1):
+        async def malformed_request(
+            _config: Any,
+            command: str,
+            payload: Any = None,
+            value: Any = malformed,
+        ) -> Any:
+            return [
+                matter_snapshot(
+                    config_updates={"enableServerRvc": value}
+                ).plugin
+            ]
+
+        targets._matter_request = malformed_request
+        try:
+            try:
+                await targets.async_matter_manual_pairing_entities(
+                    SimpleNamespace(), desired
+                )
+            except RuntimeError:
+                check(True, "Missing or malformed enableServerRvc fails closed")
+            else:
+                raise AssertionError("Malformed enableServerRvc must fail closed")
+        finally:
+            targets._matter_request = original_request
+    return 7
+
+
+async def check_matter_removal_restart_and_rollback() -> int:
+    """Removals and compensating rollback use one generation-gated restart."""
+    desired = frozenset({"light.one"})
+    removed = frozenset({"camera.old"})
+    old = matter_snapshot(
+        config_updates={"whiteList": ["camera.old", "light.one"]}
+    )
+    generation = targets.MatterProcessGeneration(1_000, 4)
+    calls: list[str] = []
+
+    async def read_snapshot(_config: Any) -> Any:
+        calls.append("snapshot")
+        return old
+
+    async def persist(_config: Any, plugin_config: Any) -> frozenset[str]:
+        check(
+            plugin_config["whiteList"] == ["light.one"],
+            "Removal persists the exact reduced allowlist",
+        )
+        calls.append("persist")
+        return desired
+
+    async def request(_config: Any, command: str, payload: Any = None) -> Any:
+        check(command == "settings", "Removal snapshots generation after persistence")
+        calls.append("settings")
+        return {
+            "matterbridgeInformation": {
+                "startupAt": 1_000,
+                "runningTimes": 4,
+            }
+        }
+
+    async def fire(_config: Any, command: str, payload: Any = None) -> None:
+        check(command == "restart", "Removal uses the full-process restart endpoint")
+        calls.append("restart")
+
+    async def wait(
+        _config: Any,
+        expected: frozenset[str],
+        timeout: float = 60,
+        *,
+        after_generation: Any = None,
+    ) -> Any:
+        check(
+            expected == desired and after_generation == generation,
+            "Removal readback is gated by the exact pre-restart generation",
+        )
+        calls.append("wait")
+        return {"loaded": True, "controller_verified": False}
+
+    def authorize() -> bool:
+        calls.append("authorized")
+        return True
+
+    originals = (
+        targets._read_matter_runtime_snapshot,
+        targets._persist_matter_config,
+        targets._matter_request,
+        targets._matter_fire_and_forget,
+        targets._wait_matter_runtime,
+    )
+    targets._read_matter_runtime_snapshot = read_snapshot
+    targets._persist_matter_config = persist
+    targets._matter_request = request
+    targets._matter_fire_and_forget = fire
+    targets._wait_matter_runtime = wait
+    try:
+        process_restarted = await targets._apply_matter(
+            SimpleNamespace(),
+            desired,
+            removed=removed,
+            before_matter_process_restart=authorize,
+        )
+    finally:
+        (
+            targets._read_matter_runtime_snapshot,
+            targets._persist_matter_config,
+            targets._matter_request,
+            targets._matter_fire_and_forget,
+            targets._wait_matter_runtime,
+        ) = originals
+    check(
+        process_restarted is True
+        and calls
+        == ["snapshot", "authorized", "persist", "settings", "restart", "wait"],
+        "Removal reserves its full restart before persisting and sends it exactly once",
+    )
+
+    propagated: dict[str, Any] = {}
+
+    async def apply_matter(
+        _config: Any,
+        expected: frozenset[str],
+        *,
+        removed: frozenset[str],
+        before_matter_process_restart: Any = None,
+    ) -> bool:
+        propagated.update(
+            expected=expected,
+            removed=removed,
+            callback=before_matter_process_restart,
+        )
+        return True
+
+    plan = models.TargetPlan(
+        platform=const.TargetPlatform.MATTER,
+        desired=desired,
+        current=desired | removed,
+        added=frozenset(),
+        removed=removed,
+    )
+    original_apply = targets._apply_matter
+    targets._apply_matter = apply_matter
+    try:
+        await targets.async_apply_plan(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            plan,
+            before_matter_process_restart=authorize,
+        )
+    finally:
+        targets._apply_matter = original_apply
+    check(
+        propagated["removed"] == removed
+        and propagated["expected"] == desired
+        and propagated["callback"] is authorize,
+        "TargetPlan removal provenance reaches the Matter adapter",
+    )
+
+    rollback_calls: list[str] = []
+    rollback_entities = frozenset({"light.before"})
+    rollback_generation = targets.MatterProcessGeneration(3_000, 8)
+    rollback_setting_reads = 0
+
+    async def rollback_request(
+        _config: Any, command: str, payload: Any = None
+    ) -> Any:
+        nonlocal rollback_setting_reads
+        check(command == "settings", "Rollback snapshots generation before restart")
+        rollback_setting_reads += 1
+        rollback_calls.append(f"settings-{rollback_setting_reads}")
+        return {
+            "matterbridgeInformation": {
+                "startupAt": 2_500 if rollback_setting_reads == 1 else 3_000,
+                "runningTimes": 7 if rollback_setting_reads == 1 else 8,
+            }
+        }
+
+    async def rollback_persist(_config: Any, plugin_config: Any) -> frozenset[str]:
+        rollback_calls.append("persist")
+        return rollback_entities
+
+    async def rollback_fire(
+        _config: Any, command: str, payload: Any = None
+    ) -> None:
+        check(command == "restart", "Matter rollback uses a full process restart")
+        rollback_calls.append("restart")
+
+    async def rollback_wait(
+        _config: Any,
+        expected: frozenset[str],
+        timeout: float = 60,
+        *,
+        after_generation: Any = None,
+    ) -> Any:
+        check(
+            expected == rollback_entities
+            and after_generation == rollback_generation,
+            "Rollback readback requires the post-rollback process generation",
+        )
+        rollback_calls.append("wait")
+        return {"loaded": True, "controller_verified": False}
+
+    async def validate(
+        _hass: Any, _config: Any, _platform: Any, expected: frozenset[str]
+    ) -> Any:
+        check(expected == rollback_entities, "Rollback retains exact validation")
+        rollback_calls.append("validate")
+        return {"loaded": True, "controller_verified": False}
+
+    originals = (
+        targets._matter_request,
+        targets._persist_matter_config,
+        targets._matter_fire_and_forget,
+        targets._wait_matter_runtime,
+        targets.async_validate_target,
+    )
+    targets._matter_request = rollback_request
+    targets._persist_matter_config = rollback_persist
+    targets._matter_fire_and_forget = rollback_fire
+    targets._wait_matter_runtime = rollback_wait
+    targets.async_validate_target = validate
+    try:
+        await targets.async_restore_target(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            targets.TargetBackup(
+                const.TargetPlatform.MATTER,
+                {
+                    "config": matter_snapshot(
+                        config_updates={"whiteList": ["light.before"]}
+                    ).plugin_config,
+                    "entities": rollback_entities,
+                },
+            ),
+        )
+    finally:
+        (
+            targets._matter_request,
+            targets._persist_matter_config,
+            targets._matter_fire_and_forget,
+            targets._wait_matter_runtime,
+            targets.async_validate_target,
+        ) = originals
+    check(
+        rollback_calls
+        == [
+            "settings-1",
+            "persist",
+            "settings-2",
+            "restart",
+            "wait",
+            "validate",
+        ],
+        "Matter rollback never uses plugin restart and validates after generation convergence",
+    )
+    return 9
+
+
 async def check_matter_apply_process_fallback() -> int:
     """A stuck plugin restart falls back to one full process restart."""
     expected = frozenset({"light.one"})
@@ -1323,13 +2210,24 @@ async def check_matter_apply_process_fallback() -> int:
         check(command == "restart", "Fallback restarts the Matterbridge process")
         calls.append("restart")
 
-    async def wait(_config: Any, desired: frozenset[str], timeout: float = 60) -> Any:
+    async def wait(
+        _config: Any,
+        desired: frozenset[str],
+        timeout: float = 60,
+        *,
+        after_generation: Any = None,
+    ) -> Any:
         nonlocal waits
         check(desired == expected, "Both waits retain the exact expected allowlist")
         waits += 1
         calls.append(f"wait-{waits}")
         if waits == 1:
+            check(after_generation is None, "Plugin restart has no process barrier")
             raise RuntimeError("safe test timeout")
+        check(
+            after_generation == targets.MatterProcessGeneration(1_000, 4),
+            "Fallback wait uses the exact pre-restart process generation",
+        )
         return {"loaded": True}
 
     def authorize() -> bool:
@@ -1443,11 +2341,22 @@ async def check_matter_restart_cancellation_marker() -> int:
         )
         restart_calls += 1
 
-    async def wait(_config: Any, desired: frozenset[str], timeout: float = 60) -> Any:
+    async def wait(
+        _config: Any,
+        desired: frozenset[str],
+        timeout: float = 60,
+        *,
+        after_generation: Any = None,
+    ) -> Any:
         nonlocal waits
         waits += 1
         if waits == 1:
+            check(after_generation is None, "Plugin restart has no process barrier")
             raise RuntimeError("safe simulated plugin restart timeout")
+        check(
+            after_generation == targets.MatterProcessGeneration(1_000, 4),
+            "Cancelled fallback already entered generation-gated readback",
+        )
         runtime_waiting.set()
         await asyncio.Event().wait()
 
@@ -1534,13 +2443,27 @@ async def check_guarded_matter_runtime_recovery() -> int:
         check(command == "restart", "Recovery restarts the full Matterbridge process")
         calls.append(command)
 
-    async def wait(_config: Any, entities: frozenset[str], timeout: float = 60) -> Any:
+    async def wait(
+        _config: Any,
+        entities: frozenset[str],
+        timeout: float = 60,
+        *,
+        after_generation: Any = None,
+    ) -> Any:
         nonlocal waits
         waits += 1
         check(entities == expected, "Recovery waits for the exact expected runtime")
         calls.append(f"wait-{waits}")
         if waits == 1:
+            check(after_generation is None, "Plugin recovery has no process barrier")
             raise RuntimeError("safe simulated plugin restart timeout")
+        if waits == 2:
+            check(
+                after_generation == targets.MatterProcessGeneration(1_000, 4),
+                "Recovery fallback waits beyond the pre-restart generation",
+            )
+        else:
+            check(after_generation is None, "Successful plugin recovery stays plugin-only")
         return {"loaded": True}
 
     originals = (
@@ -1695,6 +2618,127 @@ async def check_matter_source_runtime_validation() -> int:
     return 3
 
 
+async def check_dashboard_fresh_storage_and_camera_fields() -> int:
+    """Storage audits bypass Lovelace cache and retain camera-only fields."""
+    nested = sources_module.extract_dashboard_entities(
+        {
+            "views": [
+                {
+                    "path": "default-view",
+                    "cards": [
+                        {
+                            "camera_image": "camera.front",
+                            "elements": [{"entity": "camera.side"}],
+                        },
+                        {
+                            "camera_entity": "camera.live",
+                            "card": {"entity": "sensor.stream_health"},
+                            "visibility": [
+                                {"entity": "input_boolean.visibility_only"}
+                            ],
+                        },
+                        {
+                            "type": "conditional",
+                            "conditions": [
+                                {"entity": "binary_sensor.condition_only"}
+                            ],
+                            "card": {"entity": "light.visible_card"},
+                        },
+                    ],
+                }
+            ]
+        },
+        "default-view",
+    )
+    check(
+        nested.entities
+        == {
+            "camera.front",
+            "camera.side",
+            "camera.live",
+            "sensor.stream_health",
+            "light.visible_card",
+        },
+        "Dashboard extraction follows camera fields and presentation containers without condition-only helpers",
+    )
+
+    stale_calls = 0
+
+    class StorageDashboard:
+        mode = "storage"
+        config = {"id": "lovelace"}
+
+        async def async_load(self, _force: bool) -> dict[str, Any]:
+            nonlocal stale_calls
+            stale_calls += 1
+            return {
+                "views": [
+                    {"path": "default-view", "cards": [{"entity": "camera.stale"}]}
+                ]
+            }
+
+    fresh = {
+        "views": [
+            {"path": "default-view", "cards": [{"entity": "camera.fresh"}]},
+            {"path": "camera", "cards": [{"entity": "camera.second"}]},
+        ]
+    }
+    loaded_paths: list[str] = []
+
+    async def executor(function: Any, path: str) -> Any:
+        loaded_paths.append(path)
+        return function(path)
+
+    hass = SimpleNamespace(
+        data={
+            "lovelace": SimpleNamespace(
+                dashboards={"lovelace": StorageDashboard()}
+            )
+        },
+        config=SimpleNamespace(
+            path=lambda *parts: "/config/" + "/".join(parts)
+        ),
+        async_add_executor_job=executor,
+    )
+    original_loader = sources_module._load_storage_dashboard
+    sources_module._load_storage_dashboard = lambda _path: fresh
+    try:
+        snapshot = await sources_module.async_read_dashboard_sources(
+            hass,
+            (("lovelace", "default-view"), ("lovelace", "camera")),
+        )
+    finally:
+        sources_module._load_storage_dashboard = original_loader
+    check(
+        snapshot.entities == {"camera.fresh", "camera.second"}
+        and stale_calls == 0,
+        "Storage dashboard reconciliation bypasses the stale native cache",
+    )
+    check(
+        loaded_paths == ["/config/.storage/lovelace.lovelace"],
+        "Named Lovelace storage uses the official dashboard storage key",
+    )
+
+    sources_module._load_storage_dashboard = lambda _path: (_ for _ in ()).throw(
+        RuntimeError("malformed storage")
+    )
+    try:
+        try:
+            await sources_module.async_read_dashboard_source(
+                hass, "lovelace", "default-view"
+            )
+        except RuntimeError as error:
+            check(
+                "malformed storage" in str(error),
+                "Malformed fresh storage fails closed instead of using stale cache",
+            )
+        else:
+            raise AssertionError("Malformed fresh storage must fail closed")
+    finally:
+        sources_module._load_storage_dashboard = original_loader
+    return 4
+
+
 async def check_matter_request_overall_timeout() -> int:
     """A silent websocket is bounded by the whole-request timeout."""
     sent_methods: list[str] = []
@@ -1820,7 +2864,7 @@ def check_matter_endpoint_compatibility() -> int:
 
 
 async def check_matter_save_barrier_and_uncertain_restart() -> int:
-    """Save readback strictly precedes one restart, even after a timeout."""
+    """An uncertain plugin restart requires a generation-gated process restart."""
     expected = frozenset({"light.one"})
     old_plugin = matter_snapshot(
         config_updates={"whiteList": ["light.old"]}
@@ -1876,11 +2920,16 @@ async def check_matter_save_barrier_and_uncertain_restart() -> int:
         check(entities == expected, "save barrier keeps the exact allowlist")
 
     async def runtime(
-        _config: Any, entities: frozenset[str], timeout: float = 60
+        _config: Any,
+        entities: frozenset[str],
+        timeout: float = 60,
+        *,
+        after_generation: Any = None,
     ) -> Any:
         nonlocal runtime_waits
         runtime_waits += 1
         check(entities == expected, "uncertain restart polls the exact runtime")
+        check(after_generation is None, "Plugin restart readback has no process barrier")
         return {"loaded": True}
 
     plugin_config = deepcopy(new_plugin["configJson"])
@@ -1893,7 +2942,12 @@ async def check_matter_save_barrier_and_uncertain_restart() -> int:
     targets._wait_matter_config_persisted = persisted
     targets._wait_matter_runtime = runtime
     try:
-        await targets._save_matter_config(SimpleNamespace(), plugin_config)
+        try:
+            await targets._save_matter_config(SimpleNamespace(), plugin_config)
+        except targets.MatterbridgePluginRestartUncertainError:
+            check(True, "a timed-out plugin restart is classified as uncertain")
+        else:
+            raise AssertionError("A timed-out plugin restart must not be accepted")
     finally:
         (
             targets._matter_request,
@@ -1901,10 +2955,106 @@ async def check_matter_save_barrier_and_uncertain_restart() -> int:
             targets._wait_matter_runtime,
         ) = originals
     check(
-        restart_calls == 1 and runtime_waits == 1,
-        "a timed-out restart is never resent and converges by readback only",
+        restart_calls == 1 and runtime_waits == 0,
+        "an uncertain plugin restart never accepts a stale count-only readback",
     )
-    return 3
+
+    desired_addition = frozenset({"light.old", "light.one"})
+    old_snapshot = matter_snapshot(
+        config_updates={"whiteList": ["light.old"]}
+    )
+    converged_snapshot = matter_snapshot(
+        plugin_updates={"registeredDevices": 2},
+        config_updates={"whiteList": sorted(desired_addition)},
+        devices=[
+            {
+                "pluginName": targets.MATTER_PLUGIN,
+                "endpoint": 1,
+                "uniqueId": "device-old",
+                "serial": "serial-old",
+            },
+            {
+                "pluginName": targets.MATTER_PLUGIN,
+                "endpoint": 2,
+                "uniqueId": "device-new",
+                "serial": "serial-new",
+            },
+        ],
+    )
+    recovery_calls: list[str] = []
+
+    async def addition_request(
+        _config: Any, command: str, payload: Any = None
+    ) -> Any:
+        check(command == "plugins", "addition reads the current plugin config")
+        return [old_snapshot.plugin]
+
+    async def uncertain_save(_config: Any, _plugin_config: Any) -> None:
+        recovery_calls.append("uncertain")
+        raise targets.MatterbridgePluginRestartUncertainError("uncertain")
+
+    async def converged_read(_config: Any) -> Any:
+        recovery_calls.append("snapshot")
+        return converged_snapshot
+
+    async def full_restart(
+        _config: Any, command: str, payload: Any = None
+    ) -> None:
+        check(command == "restart", "uncertain restart uses the process endpoint")
+        recovery_calls.append("restart")
+
+    async def generation_wait(
+        _config: Any,
+        entities: frozenset[str],
+        timeout: float = 60,
+        *,
+        after_generation: Any = None,
+    ) -> Any:
+        check(
+            entities == desired_addition
+            and after_generation == targets.MatterProcessGeneration(1_000, 4),
+            "uncertain restart requires the exact desired set and generation barrier",
+        )
+        recovery_calls.append("wait")
+        return {"loaded": True}
+
+    def authorize_recovery() -> bool:
+        recovery_calls.append("authorized")
+        return True
+
+    originals = (
+        targets._matter_request,
+        targets._save_matter_config,
+        targets._read_matter_runtime_snapshot,
+        targets._matter_fire_and_forget,
+        targets._wait_matter_runtime,
+    )
+    targets._matter_request = addition_request
+    targets._save_matter_config = uncertain_save
+    targets._read_matter_runtime_snapshot = converged_read
+    targets._matter_fire_and_forget = full_restart
+    targets._wait_matter_runtime = generation_wait
+    try:
+        process_restarted = await targets._apply_matter(
+            SimpleNamespace(),
+            desired_addition,
+            before_matter_process_restart=authorize_recovery,
+        )
+    finally:
+        (
+            targets._matter_request,
+            targets._save_matter_config,
+            targets._read_matter_runtime_snapshot,
+            targets._matter_fire_and_forget,
+            targets._wait_matter_runtime,
+        ) = originals
+    check(
+        process_restarted is True
+        and recovery_calls
+        == ["uncertain", "snapshot", "authorized", "restart", "wait"],
+        "an uncertain addition forces one authorized generation-gated process restart",
+    )
+    return 8
 
 
 async def check_matter_backup_completion_handshake() -> int:
@@ -2017,10 +3167,14 @@ async def check_matter_backup_completion_handshake() -> int:
 async def check_matter_restart_is_fire_and_forget() -> int:
     """A process restart send never waits for a response from the exiting server."""
     sent: list[dict[str, Any]] = []
+    fail_on_close = False
+    fail_during_send = False
 
     class FakeWebSocket:
         async def send_json(self, request: dict[str, Any]) -> None:
             sent.append(request)
+            if fail_during_send:
+                raise ConnectionResetError("simulated close during restart send")
 
         async def receive(self) -> Any:
             raise AssertionError("A process restart must not wait for a response")
@@ -2033,6 +3187,8 @@ async def check_matter_restart_is_fire_and_forget() -> int:
             return self.value
 
         async def __aexit__(self, *_args: Any) -> None:
+            if fail_on_close:
+                raise ConnectionResetError("simulated restart socket close")
             return None
 
     class FakeClientSession:
@@ -2056,17 +3212,36 @@ async def check_matter_restart_is_fire_and_forget() -> int:
             "restart",
             {},
         )
+        fail_on_close = False
+        fail_during_send = True
+        await targets._matter_fire_and_forget(
+            SimpleNamespace(matter_host="127.0.0.1", matter_port=8283),
+            "restart",
+            {},
+        )
+        fail_on_close = True
+        await targets._matter_fire_and_forget(
+            SimpleNamespace(matter_host="127.0.0.1", matter_port=8283),
+            "restart",
+            {},
+        )
     finally:
         if previous_aiohttp is None:
             sys.modules.pop("aiohttp", None)
         else:
             sys.modules["aiohttp"] = previous_aiohttp
-    check(len(sent) == 1, "Process restart sends exactly one websocket command")
     check(
-        sent[0]["method"] == "/api/restart" and sent[0]["params"] == {},
+        len(sent) == 3,
+        "Each process restart attempt sends once, including when its socket closes",
+    )
+    check(
+        all(
+            request["method"] == "/api/restart" and request["params"] == {}
+            for request in sent
+        ),
         "Process restart uses only the fire-and-forget restart endpoint",
     )
-    return 3
+    return 5
 
 
 def check_google_room_schema() -> int:
@@ -2106,10 +3281,615 @@ def check_google_room_schema() -> int:
     return 4
 
 
+async def check_google_native_acceptance() -> int:
+    """Require exact native SYNC payloads and honest Request Sync acceptance."""
+
+    class NativeGoogle:
+        def __init__(self, status: int = 200) -> None:
+            self.status = status
+            self.users = ("opaque-user-a",)
+            self.payloads: dict[str, list[dict[str, Any]]] = {}
+
+        async def async_get_agent_users(self) -> tuple[str, ...]:
+            return self.users
+
+        async def async_sync_entities_all(self) -> int:
+            return self.status
+
+    native = NativeGoogle()
+    runtime = native
+    runtime._config = {"expose_by_default": False}
+    runtime.entity_config = {
+        "lock.front": {"expose": True},
+        "alarm_control_panel.home": {"expose": True},
+        "camera.front": {"expose": True},
+        "binary_sensor.motion": {"expose": True},
+    }
+    entry = SimpleNamespace(state="loaded", runtime_data=runtime)
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(
+            async_entries=lambda domain: [entry] if domain == "google_assistant" else []
+        )
+    )
+    google_package = ModuleType("homeassistant.components.google_assistant")
+    google_package.__path__ = []
+    google_const = ModuleType("homeassistant.components.google_assistant.const")
+    google_const.DOMAIN_TO_GOOGLE_TYPES = {
+        "lock": "action.devices.types.LOCK",
+        "alarm_control_panel": "action.devices.types.SECURITYSYSTEM",
+        "camera": "action.devices.types.CAMERA",
+    }
+    sys.modules["homeassistant.components.google_assistant"] = google_package
+    sys.modules["homeassistant.components.google_assistant.const"] = google_const
+    google_smart_home = ModuleType(
+        "homeassistant.components.google_assistant.smart_home"
+    )
+    serialized_users: list[str] = []
+
+    async def async_devices_sync_response(
+        _hass: Any, _config: Any, agent_user_id: str
+    ) -> list[dict[str, str]]:
+        serialized_users.append(agent_user_id)
+        return deepcopy(native.payloads[agent_user_id])
+
+    google_smart_home.async_devices_sync_response = async_devices_sync_response
+    sys.modules[
+        "homeassistant.components.google_assistant.smart_home"
+    ] = google_smart_home
+    unsupported_entities = {"binary_sensor.motion", "sensor.illuminance"}
+
+    class GoogleEntity:
+        def __init__(self, _hass: Any, _config: Any, state: Any) -> None:
+            self.state = state
+
+        def is_supported(self) -> bool:
+            return self.state.entity_id not in unsupported_entities
+
+    google_helpers = ModuleType("homeassistant.components.google_assistant.helpers")
+    google_helpers.GoogleEntity = GoogleEntity
+    sys.modules["homeassistant.components.google_assistant.helpers"] = google_helpers
+
+    def state(entity_id: str, device_class: str | None = None) -> Any:
+        return SimpleNamespace(
+            entity_id=entity_id,
+            domain=entity_id.split(".", 1)[0],
+            state="unavailable" if entity_id == "binary_sensor.motion" else "on",
+            attributes={"device_class": device_class} if device_class else {},
+        )
+
+    states = {
+        "lock.front": state("lock.front"),
+        "alarm_control_panel.home": state("alarm_control_panel.home"),
+        "camera.front": state("camera.front"),
+        "binary_sensor.motion": state("binary_sensor.motion", "motion"),
+        "camera.keep": state("camera.keep"),
+        "lock.keep": state("lock.keep"),
+        "alarm_control_panel.keep": state("alarm_control_panel.keep"),
+        "binary_sensor.door": state("binary_sensor.door", "door"),
+        "sensor.temperature": state("sensor.temperature", "temperature"),
+        "sensor.illuminance": state("sensor.illuminance", "illuminance"),
+        "light.unsupported": state("light.unsupported"),
+    }
+    hass.states = SimpleNamespace(get=states.get)
+
+    snapshot = await targets._google_native_snapshot(
+        hass,
+        frozenset(
+            {
+                "lock.front",
+                "alarm_control_panel.home",
+                "camera.front",
+                "binary_sensor.motion",
+            }
+        ),
+    )
+    check(
+        snapshot["linked_users"] == 1
+        and snapshot["native_security_devices"] == 3
+        and snapshot["configured_but_not_native_domain"] == 1
+        and snapshot["native_security_types"]["lock.front"].endswith(".LOCK"),
+        "Google native snapshot distinguishes native security types from "
+        "unsupported entities",
+    )
+
+    expected = frozenset(
+        {
+            "camera.keep",
+            "lock.keep",
+            "alarm_control_panel.keep",
+            "binary_sensor.door",
+            "sensor.temperature",
+            "binary_sensor.motion",
+            "sensor.illuminance",
+        }
+    )
+    runtime.entity_config = {
+        entity_id: {"expose": True} for entity_id in expected
+    }
+    native.users = ("opaque-user-a", "opaque-user-b")
+    security_types = {
+        "camera.keep": "action.devices.types.CAMERA",
+        "lock.keep": "action.devices.types.LOCK",
+        "alarm_control_panel.keep": "action.devices.types.SECURITYSYSTEM",
+    }
+    security_traits = {
+        "camera.keep": "action.devices.traits.CameraStream",
+        "lock.keep": "action.devices.traits.LockUnlock",
+        "alarm_control_panel.keep": "action.devices.traits.ArmDisarm",
+    }
+
+    def serialized_device(entity_id: str) -> dict[str, Any]:
+        device: dict[str, Any] = {
+            "id": entity_id,
+            "type": "action.devices.types.SENSOR",
+            "traits": ["action.devices.traits.SensorState"],
+        }
+        if entity_id in security_types:
+            device["type"] = security_types[entity_id]
+            device["traits"] = [security_traits[entity_id]]
+        return device
+
+    supported_payload = [
+        serialized_device(entity_id)
+        for entity_id in sorted(expected - unsupported_entities)
+    ]
+    native.payloads = {
+        "opaque-user-a": deepcopy(supported_payload),
+        "opaque-user-b": deepcopy(supported_payload),
+    }
+    full_snapshot = await targets._google_native_sync_payload_snapshot(
+        hass, expected
+    )
+    check(
+        full_snapshot["native_supported_payload_exact"] is True
+        and full_snapshot["native_sync_payload_match"] is True
+        and full_snapshot["configured_sync_devices"] == 7
+        and full_snapshot["native_sync_devices"] == 5
+        and full_snapshot["native_unsupported_devices"] == 2
+        and full_snapshot["linked_users"] == 2
+        and serialized_users == ["opaque-user-a", "opaque-user-b"]
+        and all(
+            device["id"] != "camera.removed"
+            for payload in native.payloads.values()
+            for device in payload
+        ),
+        "Every linked user receives the exact native set after an entity is removed",
+    )
+    serialized_users.clear()
+    await targets._google_native_snapshot(hass, expected)
+    check(
+        not serialized_users,
+        "Periodic native health checks do not generate complete SYNC payloads",
+    )
+
+    native.payloads["opaque-user-b"] = deepcopy(supported_payload[1:])
+    try:
+        await targets._google_native_sync_payload_snapshot(hass, expected)
+    except RuntimeError as error:
+        check(
+            "missing=1" in str(error)
+            and serialized_users == ["opaque-user-a", "opaque-user-b"],
+            "Every linked user's native SYNC payload is checked independently",
+        )
+    else:
+        raise AssertionError("A later linked-user payload mismatch must fail closed")
+
+    native.users = ("opaque-user-a",)
+    for missing_entity in (
+        "camera.keep",
+        "lock.keep",
+        "alarm_control_panel.keep",
+        "binary_sensor.door",
+        "sensor.temperature",
+    ):
+        native.payloads["opaque-user-a"] = [
+            deepcopy(device)
+            for device in supported_payload
+            if device["id"] != missing_entity
+        ]
+        try:
+            await targets._google_native_sync_payload_snapshot(hass, expected)
+        except RuntimeError as error:
+            check(
+                "missing=1" in str(error) and "extra=0" in str(error),
+                f"A missing supported Google entity fails closed: {missing_entity}",
+            )
+        else:
+            raise AssertionError(
+                f"A missing supported Google entity must fail closed: {missing_entity}"
+            )
+
+    native.payloads["opaque-user-a"] = deepcopy(supported_payload)
+    unsupported_entities.remove("binary_sensor.motion")
+    try:
+        await targets._google_native_sync_payload_snapshot(hass, expected)
+    except RuntimeError as error:
+        check(
+            "missing=1" in str(error) and "extra=0" in str(error),
+            "A formerly unsupported entity becomes required when HA adds support",
+        )
+    else:
+        raise AssertionError("New native support must restore the exact-set requirement")
+    finally:
+        unsupported_entities.add("binary_sensor.motion")
+
+    missing_state = states.pop("sensor.illuminance")
+    try:
+        await targets._google_native_sync_payload_snapshot(hass, expected)
+    except RuntimeError as error:
+        check(
+            "configured-device state missing" in str(error),
+            "A missing HA State is not mistaken for a platform limitation",
+        )
+    else:
+        raise AssertionError("A configured entity without a State must fail closed")
+    finally:
+        states["sensor.illuminance"] = missing_state
+
+    unsupported_entities.add("light.unsupported")
+    native.payloads["opaque-user-a"] = []
+    try:
+        await targets._google_native_sync_payload_snapshot(
+            hass, frozenset({"light.unsupported"})
+        )
+    except RuntimeError as error:
+        check(
+            "controllable-device support is missing" in str(error),
+            "An unsupported controllable domain never becomes an allowed omission",
+        )
+    else:
+        raise AssertionError("Unsupported controllable entities must fail closed")
+    finally:
+        unsupported_entities.remove("light.unsupported")
+
+    unsupported_entities.add("camera.front")
+    try:
+        unrepresentable = targets.google_native_unrepresentable_entities(
+            hass,
+            frozenset(
+                {
+                    "camera.front",
+                    "binary_sensor.motion",
+                    "sensor.illuminance",
+                }
+            ),
+        )
+        check(
+            unrepresentable == frozenset({"camera.front"}),
+            "Google compatibility planning skips only unsupported "
+            "non-observation entities",
+        )
+    finally:
+        unsupported_entities.remove("camera.front")
+
+    check(
+        targets.matter_native_unrepresentable_entities(
+            frozenset(
+                {
+                    "camera.front",
+                    "alarm_control_panel.home",
+                    "lock.front",
+                    "sensor.temperature",
+                }
+            )
+        )
+        == frozenset({"camera.front", "alarm_control_panel.home"}),
+        "Matter compatibility planning reports device types Matter lacks "
+        "without hiding supported endpoints",
+    )
+
+    malformed_security_payload = deepcopy(supported_payload)
+    next(
+        device
+        for device in malformed_security_payload
+        if device["id"] == "camera.keep"
+    )["type"] = "action.devices.types.SENSOR"
+    native.payloads["opaque-user-a"] = malformed_security_payload
+    try:
+        await targets._google_native_sync_payload_snapshot(hass, expected)
+    except RuntimeError as error:
+        check(
+            "security-device payload is malformed" in str(error),
+            "A security device must retain its native Google type",
+        )
+    else:
+        raise AssertionError("A malformed security-device type must fail closed")
+
+    for malformed_entity in security_traits:
+        malformed_security_payload = deepcopy(supported_payload)
+        next(
+            device
+            for device in malformed_security_payload
+            if device["id"] == malformed_entity
+        )["traits"] = ["action.devices.traits.OnOff"]
+        native.payloads["opaque-user-a"] = malformed_security_payload
+        try:
+            await targets._google_native_sync_payload_snapshot(hass, expected)
+        except RuntimeError as error:
+            check(
+                "security-device payload is malformed" in str(error),
+                f"A security device must retain its required trait: {malformed_entity}",
+            )
+        else:
+            raise AssertionError(
+                f"A malformed security-device trait must fail closed: {malformed_entity}"
+            )
+
+    native.payloads["opaque-user-a"] = deepcopy(supported_payload) + [
+        serialized_device("camera.removed")
+    ]
+    try:
+        await targets._google_native_sync_payload_snapshot(hass, expected)
+    except RuntimeError as error:
+        check(
+            "missing=0" in str(error) and "extra=1" in str(error),
+            "A removed entity lingering in native SYNC fails closed",
+        )
+    else:
+        raise AssertionError("An extra native SYNC entity must fail closed")
+
+    native.payloads["opaque-user-a"] = deepcopy(supported_payload) + [
+        deepcopy(supported_payload[0])
+    ]
+    try:
+        await targets._google_native_sync_payload_snapshot(hass, expected)
+    except RuntimeError as error:
+        check(
+            "duplicate" in str(error),
+            "Duplicate native device ids fail closed",
+        )
+    else:
+        raise AssertionError("Duplicate native device ids must fail closed")
+
+    sync_result = await targets._request_google_sync(hass)
+    check(
+        sync_result["request_sync_accepted"] is True
+        and sync_result["request_sync_http_status"] == 200
+        and sync_result["homegraph_readback_verified"] is False,
+        "Request Sync 2xx is recorded only as accepted, not HomeGraph readback",
+    )
+    native.status = 404
+    try:
+        await targets._request_google_sync(hass)
+    except RuntimeError as error:
+        check("relink" in str(error), "Google HomeGraph 404 requires relinking")
+    else:
+        raise AssertionError("Google HomeGraph 404 must fail closed")
+    native.status = 204
+    try:
+        await targets._request_google_sync(hass)
+    except RuntimeError as error:
+        check("no linked" in str(error), "Google request sync requires a linked user")
+    else:
+        raise AssertionError(
+            "Google request sync without a linked user must fail closed"
+        )
+    return 21
+
+
+async def check_google_mutation_payload_guards() -> int:
+    """Apply and rollback validate native SYNC immediately before and after."""
+    runtime_config: dict[str, dict[str, Any]] = {
+        "camera.keep": {"expose": True},
+        "camera.remove": {"expose": True},
+    }
+    runtime = SimpleNamespace(
+        _config={"expose_by_default": False},
+        entity_config=runtime_config,
+    )
+    entry = SimpleNamespace(state="loaded", runtime_data=runtime)
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(
+            async_entries=lambda domain: [entry]
+            if domain == "google_assistant"
+            else []
+        ),
+    )
+
+    async def async_add_executor_job(function: Any, *args: Any) -> Any:
+        return function(*args)
+
+    hass.async_add_executor_job = async_add_executor_job
+    config = SimpleNamespace(google_config_path="unused-google-entities.yaml")
+    absent_path = PACKAGE / "__platform_sync_absent_google_test__.yaml"
+    steps: list[tuple[str, frozenset[str]]] = []
+
+    async def load_google_yaml(
+        _hass: Any, _config: Any
+    ) -> tuple[Path, dict[str, dict[str, Any]]]:
+        return absent_path, deepcopy(runtime_config)
+
+    async def native_snapshot(
+        _hass: Any, expected: frozenset[str]
+    ) -> dict[str, Any]:
+        actual = frozenset(runtime_config)
+        check(
+            actual == expected,
+            "The native guard observes the exact just-written runtime set",
+        )
+        steps.append(("native", expected))
+        return {"native_sync_payload_match": True}
+
+    async def request_sync(_hass: Any) -> dict[str, Any]:
+        steps.append(("request", frozenset(runtime_config)))
+        return {
+            "request_sync_accepted": True,
+            "homegraph_readback_verified": False,
+        }
+
+    async def validate_target(
+        _hass: Any, _config: Any, _platform: Any, expected: frozenset[str]
+    ) -> dict[str, Any]:
+        steps.append(("validate", expected))
+        return {"loaded": True}
+
+    originals = (
+        targets._load_google_yaml,
+        targets._google_native_sync_payload_snapshot,
+        targets._request_google_sync,
+        targets.async_validate_target,
+    )
+    targets._load_google_yaml = load_google_yaml
+    targets._google_native_sync_payload_snapshot = native_snapshot
+    targets._request_google_sync = request_sync
+    targets.async_validate_target = validate_target
+    try:
+        desired = frozenset({"camera.keep"})
+        await targets._apply_google(hass, config, desired, {})
+        check(
+            steps
+            == [
+                ("native", desired),
+                ("request", desired),
+                ("native", desired),
+            ],
+            "Google apply brackets Request Sync with exact native payload checks",
+        )
+
+        steps.clear()
+        previous = frozenset({"camera.before"})
+        backup = targets.TargetBackup(
+            const.TargetPlatform.GOOGLE,
+            {
+                "path": absent_path,
+                "existed": False,
+                "raw": b"",
+                "runtime": {"camera.before": {"expose": True}},
+                "entities": previous,
+            },
+        )
+        await targets.async_restore_target(hass, config, backup)
+        check(
+            steps
+            == [
+                ("native", previous),
+                ("request", previous),
+                ("native", previous),
+                ("validate", previous),
+            ],
+            "Google rollback brackets Request Sync with exact native payload checks",
+        )
+    finally:
+        (
+            targets._load_google_yaml,
+            targets._google_native_sync_payload_snapshot,
+            targets._request_google_sync,
+            targets.async_validate_target,
+        ) = originals
+    return 4
+
+
+async def check_google_executor_mutation_cancellation() -> int:
+    """Google apply/restore drain non-cancellable executor writes before escape."""
+
+    class MutationPath:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+
+        def __str__(self) -> str:
+            return "delayed-google-entities.yaml"
+
+        def write_bytes(self, value: bytes) -> int:
+            self.writes.append(value)
+            return len(value)
+
+    path = MutationPath()
+    mutation_started = asyncio.Event()
+    mutation_release = asyncio.Event()
+    mutation_finished = asyncio.Event()
+
+    async def delayed_executor(function: Any, *args: Any) -> Any:
+        mutation_started.set()
+        await mutation_release.wait()
+        result = function(*args)
+        mutation_finished.set()
+        return result
+
+    hass = SimpleNamespace(async_add_executor_job=delayed_executor)
+    config = SimpleNamespace(google_config_path="unused-google-entities.yaml")
+    original_loader = targets._load_google_yaml
+
+    async def load_google_yaml(
+        _hass: Any, _config: Any
+    ) -> tuple[Any, dict[str, dict[str, Any]]]:
+        return path, {"camera.before": {"expose": True}}
+
+    targets._load_google_yaml = load_google_yaml
+    try:
+        apply_task = asyncio.create_task(
+            targets._apply_google(
+                hass,
+                config,
+                frozenset({"camera.after"}),
+                {},
+            )
+        )
+        await mutation_started.wait()
+        apply_task.cancel()
+        await asyncio.sleep(0)
+        apply_task.cancel()
+        await asyncio.sleep(0)
+        check(
+            not apply_task.done() and not mutation_finished.is_set(),
+            "Google apply cancellation waits for its executor writer to settle",
+        )
+        mutation_release.set()
+        try:
+            await apply_task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("Google apply cancellation must propagate after drain")
+        check(
+            mutation_finished.is_set(),
+            "Google apply mutation finishes before cancellation reaches rollback",
+        )
+
+        mutation_started = asyncio.Event()
+        mutation_release = asyncio.Event()
+        mutation_finished = asyncio.Event()
+        backup = targets.TargetBackup(
+            const.TargetPlatform.GOOGLE,
+            {
+                "path": path,
+                "existed": True,
+                "raw": b"before",
+                "runtime": {"camera.before": {"expose": True}},
+                "entities": frozenset({"camera.before"}),
+            },
+        )
+        restore_task = asyncio.create_task(
+            targets.async_restore_target(hass, config, backup)
+        )
+        await mutation_started.wait()
+        restore_task.cancel()
+        await asyncio.sleep(0)
+        restore_task.cancel()
+        await asyncio.sleep(0)
+        check(
+            not restore_task.done() and not mutation_finished.is_set(),
+            "Google restore cancellation waits for its executor writer to settle",
+        )
+        mutation_release.set()
+        try:
+            await restore_task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("Google restore cancellation must propagate after drain")
+        check(
+            mutation_finished.is_set() and path.writes == [b"before"],
+            "Google restore mutation finishes before cancellation is reported incomplete",
+        )
+    finally:
+        targets._load_google_yaml = original_loader
+    return 4
+
+
 async def check_single_switch_runtime() -> int:
-    """Version 0.6.5 has one enable switch and no sensor/button platforms."""
+    """Version 0.7.0 has one enable switch and no sensor/button platforms."""
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
-    check(manifest["version"] == "0.6.5", "Manifest version is 0.6.5")
+    check(manifest["version"] == "0.7.0", "Manifest version matches the authorized 0.7.0 release")
     check(const.DEFAULT_ENABLED is False, "New installations default disabled")
     check(const.PLATFORMS == (), "Version 0.4 exposes no sensor/button platforms")
     check(
@@ -2124,9 +3904,34 @@ async def check_single_switch_runtime() -> int:
     runtime_defaults = runtime_config_module.SyncConfig.from_entry({}, {})
     check(
         runtime_defaults.enabled is False
+        and runtime_defaults.homekit_main_entry_id == ""
         and not hasattr(runtime_defaults, "auto_apply")
         and not hasattr(runtime_defaults, "profile_name"),
-        "Runtime has one disabled-by-default switch and no custom name",
+        "Runtime has one disabled-by-default switch, legacy main-ID inference, and no custom name",
+    )
+    explicit_main = runtime_config_module.SyncConfig.from_entry(
+        {const.CONF_HOMEKIT_MAIN_ENTRY_ID: "old-main"},
+        {const.CONF_HOMEKIT_MAIN_ENTRY_ID: "new-main"},
+    )
+    check(
+        explicit_main.homekit_main_entry_id == "new-main",
+        "Runtime options override data for the durable HomeKit main entry ID",
+    )
+    for invalid_main_id in (7, " main-with-spaces "):
+        try:
+            runtime_config_module.SyncConfig.from_entry(
+                {const.CONF_HOMEKIT_MAIN_ENTRY_ID: invalid_main_id}, {}
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                "Malformed HomeKit main entry IDs must fail closed: "
+                f"{invalid_main_id!r}"
+            )
+    check(
+        True,
+        "Runtime rejects non-string and whitespace-mutated main entry IDs",
     )
     legacy_dashboard = runtime_config_module.SyncConfig.from_entry(
         {
@@ -2353,14 +4158,28 @@ async def check_single_switch_runtime() -> int:
         recording.apply_values == [False, True],
         "Preview remains read-only while sync_now explicitly applies",
     )
-    return 15
+    return 17
 
 
 async def check_safe_migration() -> int:
-    """Migrate v1-v4.2 safely into schema 4.3 with exact HomeKit sources."""
+    """Migrate v1-v4.3 safely into schema 4.4 with durable HomeKit identity."""
     homekit_entries = [
-        SimpleNamespace(entry_id="homekit-main"),
-        SimpleNamespace(entry_id="homekit-accessory"),
+        FakeEntry(
+            "homekit-main",
+            options={
+                "filter": {
+                    "include_entities": ["light.main_one", "light.main_two"]
+                },
+                "homekit_mode": "bridge",
+            },
+        ),
+        FakeEntry(
+            "homekit-accessory",
+            options={
+                "filter": {"include_entities": ["lock.front"]},
+                "homekit_mode": "accessory",
+            },
+        ),
     ]
     profile = SimpleNamespace(
         version=1,
@@ -2423,11 +4242,11 @@ async def check_safe_migration() -> int:
     )
     check(
         profile.version == 4
-        and profile.minor_version == 3
+        and profile.minor_version == 4
         and profile.title == TITLE_ZH_HANT
         and LEGACY_PROFILE_NAME not in profile.data
         and LEGACY_PROFILE_NAME not in profile.options,
-        "Version 1 migrates to 4.3, discards custom names, and fixes zh-Hant title",
+        "Version 1 migrates to 4.4, discards custom names, and fixes zh-Hant title",
     )
     check(
         profile.options[const.CONF_ENABLED] is False
@@ -2445,11 +4264,12 @@ async def check_safe_migration() -> int:
     check(
         profile.options[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
         == ["homekit-main", "homekit-accessory"]
+        and profile.options[const.CONF_HOMEKIT_MAIN_ENTRY_ID] == "homekit-main"
         and runtime_config_module.SyncConfig.from_entry(
             profile.data, profile.options
-        ).homekit_managed_entry_ids
-        == ("homekit-main", "homekit-accessory"),
-        "Version 1 replaces an explicit empty options-layer HomeKit list with an effective current snapshot",
+        ).homekit_main_entry_id
+        == "homekit-main",
+        "Version 1 snapshots its managed entries and durably identifies the main Bridge",
     )
     locked = profile.data[const.CONF_LOCKED_RULES]
     empty_locked = integration_module.serialize_rules(
@@ -2512,7 +4332,7 @@ async def check_safe_migration() -> int:
         migrated_results.append(legacy_v2.options[const.CONF_ENABLED])
         check(
             legacy_v2.version == 4
-            and legacy_v2.minor_version == 3
+            and legacy_v2.minor_version == 4
             and legacy_v2.title == TITLE_EN
             and legacy_v2.options[const.CONF_ENABLED] is expected
             and const.CONF_ENABLED not in legacy_v2.data
@@ -2592,11 +4412,11 @@ async def check_safe_migration() -> int:
     )
     check(
         legacy_v3.version == 4
-        and legacy_v3.minor_version == 3
+        and legacy_v3.minor_version == 4
         and legacy_v3.title == TITLE_ZH_HANT
         and LEGACY_PROFILE_NAME not in legacy_v3.data
         and LEGACY_PROFILE_NAME not in legacy_v3.options,
-        "Version 3 reaches 4.3 with the fixed localized title and no name field",
+        "Version 3 reaches 4.4 with the fixed localized title and no name field",
     )
     check(
         legacy_v3.data == expected_v3_data
@@ -2623,8 +4443,8 @@ async def check_safe_migration() -> int:
         "Version 4.0 single-dashboard entry migrates",
     )
     check(
-        legacy_v4.version == 4 and legacy_v4.minor_version == 3,
-        "Version 4.0 reaches schema 4.3",
+        legacy_v4.version == 4 and legacy_v4.minor_version == 4,
+        "Version 4.0 reaches schema 4.4",
     )
     check(
         legacy_v4.options[const.CONF_SOURCE_PAGES]
@@ -2655,7 +4475,7 @@ async def check_safe_migration() -> int:
     )
     check(
         homekit_v41.version == 4
-        and homekit_v41.minor_version == 3
+        and homekit_v41.minor_version == 4
         and homekit_v41.options[const.CONF_HOMEKIT_SOURCE_ENTRY_IDS]
         == ["homekit-main", "homekit-accessory"]
         and homekit_v41.options[const.CONF_ENABLED] is True
@@ -2675,7 +4495,7 @@ async def check_safe_migration() -> int:
         await integration_module.async_migrate_entry(hass_en, homekit_v41)
         and homekit_v41.options[const.CONF_HOMEKIT_SOURCE_ENTRY_IDS]
         == ["homekit-main", "homekit-accessory"],
-        "A completed 4.3 migration never auto-adopts a later HomeKit entry",
+        "A completed 4.4 migration never auto-adopts a later HomeKit entry",
     )
 
     class EmptyMigrationEntries(MigrationEntries):
@@ -2703,7 +4523,7 @@ async def check_safe_migration() -> int:
     )
     check(
         empty_homekit_v41.version == 4
-        and empty_homekit_v41.minor_version == 3
+        and empty_homekit_v41.minor_version == 4
         and empty_homekit_v41.options[const.CONF_HOMEKIT_SOURCE_ENTRY_IDS] == []
         and empty_homekit_v41.options[const.CONF_ENABLED] is False
         and empty_homekit_v41.data[const.CONF_TARGET_PLATFORMS]
@@ -2729,7 +4549,7 @@ async def check_safe_migration() -> int:
     )
     check(
         non_homekit_v41.version == 4
-        and non_homekit_v41.minor_version == 3
+        and non_homekit_v41.minor_version == 4
         and const.CONF_HOMEKIT_SOURCE_ENTRY_IDS not in non_homekit_v41.data
         and const.CONF_HOMEKIT_SOURCE_ENTRY_IDS not in non_homekit_v41.options
         and non_homekit_v41.options[const.CONF_ENABLED] is True
@@ -2758,7 +4578,7 @@ async def check_safe_migration() -> int:
     check(
         await integration_module.async_migrate_entry(hass_en, legacy_v42)
         and legacy_v42.version == 4
-        and legacy_v42.minor_version == 3
+        and legacy_v42.minor_version == 4
         and legacy_v42.data[const.CONF_LOCKED_RULES] == v42_locked
         and legacy_v42.data[const.CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION] is True,
         "Version 4.2 preserves its immutable rules and materializes the legacy Apple TV exclusion flag",
@@ -2768,8 +4588,156 @@ async def check_safe_migration() -> int:
         await integration_module.async_migrate_entry(hass_en, legacy_v42)
         and migrated_v42_snapshot
         == (legacy_v42.data, legacy_v42.options),
-        "A completed 4.3 migration is idempotent",
+        "A completed 4.4 migration is idempotent",
     )
+
+    class CountingMigrationEntries(MigrationEntries):
+        def __init__(self, entries: list[FakeEntry]) -> None:
+            self.entries = entries
+            self.update_calls = 0
+
+        def async_entries(self, domain: str) -> list[Any]:
+            return list(self.entries) if domain == "homekit" else []
+
+        def async_update_entry(
+            self,
+            entry: Any,
+            *,
+            data: dict[str, Any],
+            options: dict[str, Any],
+            title: str,
+            version: int,
+            minor_version: int,
+        ) -> None:
+            self.update_calls += 1
+            super().async_update_entry(
+                entry,
+                data=data,
+                options=options,
+                title=title,
+                version=version,
+                minor_version=minor_version,
+            )
+
+    inferred_entries = [
+        FakeEntry(
+            "v43-main",
+            options={
+                "filter": {"include_entities": ["light.one", "light.two"]},
+                "homekit_mode": "bridge",
+            },
+        ),
+        FakeEntry(
+            "v43-side",
+            options={
+                "filter": {"include_entities": ["switch.side"]},
+                "homekit_mode": "bridge",
+            },
+        ),
+    ]
+    inferred_config_entries = CountingMigrationEntries(inferred_entries)
+    inferred_hass = SimpleNamespace(
+        config_entries=inferred_config_entries,
+        config=SimpleNamespace(language="en"),
+    )
+    legacy_v43 = SimpleNamespace(
+        version=4,
+        minor_version=3,
+        title=TITLE_EN,
+        data={
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+            const.CONF_SOURCE_ENTITIES: ["light.one"],
+            const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value],
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: ["v43-main", "v43-side"],
+        },
+        options={const.CONF_ENABLED: True},
+    )
+    check(
+        await integration_module.async_migrate_entry(inferred_hass, legacy_v43),
+        "A 4.3 HomeKit target with one provable main Bridge migrates",
+    )
+    check(
+        legacy_v43.version == 4
+        and legacy_v43.minor_version == 4
+        and legacy_v43.options[const.CONF_HOMEKIT_MAIN_ENTRY_ID] == "v43-main"
+        and inferred_config_entries.update_calls == 1,
+        "The 4.4 migration durably stores the inferred main ID before setup",
+    )
+    inferred_snapshot = (
+        deepcopy(legacy_v43.data),
+        deepcopy(legacy_v43.options),
+        legacy_v43.title,
+    )
+    check(
+        await integration_module.async_migrate_entry(inferred_hass, legacy_v43)
+        and inferred_snapshot
+        == (legacy_v43.data, legacy_v43.options, legacy_v43.title)
+        and inferred_config_entries.update_calls == 1,
+        "A completed 4.4 main-ID migration is idempotent",
+    )
+
+    ambiguous_entries = [
+        FakeEntry(
+            "ambiguous-one",
+            options={
+                "filter": {"include_entities": ["light.one"]},
+                "homekit_mode": "bridge",
+            },
+        ),
+        FakeEntry(
+            "ambiguous-two",
+            options={
+                "filter": {"include_entities": ["light.two"]},
+                "homekit_mode": "bridge",
+            },
+        ),
+    ]
+    ambiguous_config_entries = CountingMigrationEntries(ambiguous_entries)
+    ambiguous_hass = SimpleNamespace(
+        config_entries=ambiguous_config_entries,
+        config=SimpleNamespace(language="en"),
+    )
+    ambiguous_v43 = SimpleNamespace(
+        version=4,
+        minor_version=3,
+        title="keep-title",
+        data={
+            const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+            const.CONF_SOURCE_ENTITIES: ["light.one"],
+            const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value],
+            const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: [
+                "ambiguous-one",
+                "ambiguous-two",
+            ],
+        },
+        options={const.CONF_ENABLED: True},
+    )
+    ambiguous_snapshot = (
+        deepcopy(ambiguous_v43.data),
+        deepcopy(ambiguous_v43.options),
+        ambiguous_v43.title,
+        ambiguous_v43.version,
+        ambiguous_v43.minor_version,
+    )
+    check(
+        not await integration_module.async_migrate_entry(
+            ambiguous_hass, ambiguous_v43
+        ),
+        "A 4.3 HomeKit target with no unique main Bridge fails migration closed",
+    )
+    check(
+        ambiguous_snapshot
+        == (
+            ambiguous_v43.data,
+            ambiguous_v43.options,
+            ambiguous_v43.title,
+            ambiguous_v43.version,
+            ambiguous_v43.minor_version,
+        )
+        and ambiguous_config_entries.update_calls == 0,
+        "Failed main-ID migration leaves the Config Entry byte-for-byte equivalent",
+    )
+
     fresh_public = runtime_config_module.SyncConfig.from_entry(
         {
             const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
@@ -2779,10 +4747,10 @@ async def check_safe_migration() -> int:
         {},
     )
     check(
-        fresh_public.locked_homekit_apple_tv_exclusion is False,
-        "A new public installation has no hidden Apple TV exclusion policy",
+        fresh_public.locked_homekit_apple_tv_exclusion is True,
+        "A new installation fail-safely excludes Apple TV provenance from HomeKit",
     )
-    return 39
+    return 44
 
 
 def check_legacy_registry_cleanup() -> int:
@@ -2842,24 +4810,25 @@ def check_internal_timing_config() -> int:
         "Change-event coalescing is fixed internally at two seconds",
     )
     check(
-        const.INTERNAL_POLL_SECONDS == 15
+        const.INTERNAL_POLL_SECONDS == 60
+        and const.INTERNAL_SOURCE_AUDIT_SECONDS == 15
+        and const.INTERNAL_HEALTH_AUDIT_SECONDS == 300
         and const.INTERNAL_RETRY_SECONDS == 15
         and const.INTERNAL_RETRY_MAX_SECONDS == 300
         and const.INTERNAL_RETRY_DELAYS_SECONDS == (15, 30, 60, 120, 300),
-        "Polling stays at 15 seconds with the exact bounded fault retry schedule",
+        "Local dashboard audits run every 15 seconds while remote fallback polling stays at 60 seconds",
     )
     minimum_rollback_budget = (
-        targets.GOOGLE_SYNC_TIMEOUT
+        3 * targets.GOOGLE_SYNC_TIMEOUT
         + targets.HOMEKIT_RELOAD_TIMEOUT
         + targets.MATTER_CONFIG_PERSIST_TIMEOUT
-        + targets.MATTER_PLUGIN_RESTART_TIMEOUT
-        + 2 * targets.MATTER_RUNTIME_TIMEOUT
-        + 5 * targets.MATTER_REQUEST_TIMEOUT
+        + targets.MATTER_RUNTIME_TIMEOUT
+        + 7 * targets.MATTER_REQUEST_TIMEOUT
         + manager_module.ROLLBACK_SAFETY_MARGIN_SECONDS
     )
     check(
         manager_module.ROLLBACK_TIMEOUT_SECONDS >= minimum_rollback_budget,
-        "Rollback covers all targets after cancellation during a Matter process fallback",
+        "Rollback covers both Google payload checks, Request Sync, every target, and one Matter process-generation restart",
     )
     check(
         manager_module.STOP_DRAIN_TIMEOUT_SECONDS
@@ -2959,31 +4928,31 @@ async def check_source_watcher_policy() -> int:
             if source_kind is const.SourceKind.DASHBOARD:
                 check(
                     hass.bus.events
-                    == ["lovelace_updated", "entity_registry_updated"]
-                    and intervals == []
+                    == ["call_service", "lovelace_updated", "entity_registry_updated"]
+                    and intervals == [15, 300]
                     and dispatcher_signals == [],
-                    "Dashboard source uses Lovelace and entity-registry events without polling",
+                    "Dashboard source uses push events, a source-only audit, and a five-minute target health audit",
                 )
             elif source_kind is const.SourceKind.HOMEKIT:
                 check(
-                    hass.bus.events == []
-                    and intervals == []
+                    hass.bus.events == ["call_service"]
+                    and intervals == [60, 300]
                     and dispatcher_signals == ["config_entry_changed"],
-                    "HomeKit source uses config-entry push events without polling",
+                    "HomeKit source uses config-entry events plus a target health audit",
                 )
             elif source_kind is const.SourceKind.MANUAL:
                 check(
-                    hass.bus.events == []
-                    and intervals == []
+                    hass.bus.events == ["call_service"]
+                    and intervals == [300]
                     and dispatcher_signals == [],
-                    "Manual source has no event watcher or polling loop",
+                    "Manual source still audits target health every five minutes",
                 )
             else:
                 check(
-                    hass.bus.events == []
-                    and intervals == [15]
+                    hass.bus.events == ["call_service"]
+                    and intervals == [60]
                     and dispatcher_signals == [],
-                    f"{source_kind.value} source uses only the 15-second fallback poll",
+                    f"{source_kind.value} source uses one bounded fallback poll",
                 )
             await manager.async_stop()
 
@@ -3003,9 +4972,14 @@ async def check_source_watcher_policy() -> int:
         await target_manager.async_start()
         check(
             target_hass.bus.events
-            == ["lovelace_updated", "entity_registry_updated"]
+            == [
+                "call_service",
+                "lovelace_updated",
+                "entity_registry_updated",
+                "device_registry_updated",
+            ]
             and dispatcher_signals == ["config_entry_changed"]
-            and intervals == [],
+            and intervals == [15, 300],
             "Dashboard sources also watch explicitly managed HomeKit targets",
         )
         await target_manager.async_stop()
@@ -3025,8 +4999,8 @@ async def check_source_watcher_policy() -> int:
         )
         await manager.async_start()
         check(
-            intervals == [15] and dispatcher_signals == [],
-            "HomeKit falls back to 15-second polling only when its signal is unavailable",
+            intervals == [60] and dispatcher_signals == [],
+            "HomeKit falls back to one 60-second poll when its signal is unavailable",
         )
         await manager.async_stop()
 
@@ -3044,8 +5018,8 @@ async def check_source_watcher_policy() -> int:
         )
         await target_fallback_manager.async_start()
         check(
-            intervals == [15],
-            "A HomeKit target also falls back to polling when config-entry signals are unavailable",
+            sorted(intervals) == [15, 60],
+            "A Dashboard retains its local audit when a HomeKit target also needs fallback polling",
         )
         await target_fallback_manager.async_stop()
 
@@ -3063,8 +5037,8 @@ async def check_source_watcher_policy() -> int:
         )
         await deduplicated_manager.async_start()
         check(
-            intervals == [15],
-            "Multiple fallback reasons share one 15-second polling subscription",
+            intervals == [60],
+            "Fallback polling subsumes target health auditing without a duplicate timer",
         )
         await deduplicated_manager.async_stop()
         manager_module.config_entries.SIGNAL_CONFIG_ENTRY_CHANGED = signal
@@ -3086,7 +5060,7 @@ async def check_source_watcher_policy() -> int:
         )
         await manager.async_start()
         check(
-            intervals == [15],
+            intervals == [60],
             "HomeKit falls back to polling when event registration is incompatible",
         )
         await manager.async_stop()
@@ -3120,6 +5094,36 @@ async def check_source_watcher_policy() -> int:
                 "config_entry_changed"
             )
     return 11
+
+
+def check_quick_reload_trigger() -> int:
+    """Only the global quick YAML reload schedules mandatory reconciliation."""
+    manager = manager_module.PlatformSyncManager(
+        SimpleNamespace(), SimpleNamespace(enabled=True)
+    )
+    reasons: list[str] = []
+    manager.schedule = reasons.append
+    manager._handle_service_call(
+        SimpleNamespace(
+            data={"domain": "homeassistant", "service": "reload_all"}
+        )
+    )
+    check(
+        reasons == ["homeassistant_reload_all"],
+        "Global Quick reload schedules one full reconciliation",
+    )
+    for data in (
+        {"domain": "homeassistant", "service": "restart"},
+        {"domain": "platform_sync", "service": "sync_now"},
+        {},
+        None,
+    ):
+        manager._handle_service_call(SimpleNamespace(data=data))
+    check(
+        reasons == ["homeassistant_reload_all"],
+        "Unrelated service calls never schedule Quick-reload reconciliation",
+    )
+    return 2
 
 
 async def check_homekit_event_trigger_and_queue() -> int:
@@ -3434,11 +5438,11 @@ async def check_startup_listener_lifecycle() -> int:
 
     manager.schedule = record_schedule
     await manager.async_start()
-    check(len(manager._unsubscribers) == 3, "Startup listener is initially tracked")
+    check(len(manager._unsubscribers) == 6, "Startup listener is initially tracked")
 
     hass.bus.once_callback(SimpleNamespace(event_type="homeassistant_started"))
     check(
-        len(manager._unsubscribers) == 2 and hass.bus.once_unsubscribe_calls == 0,
+        len(manager._unsubscribers) == 5 and hass.bus.once_unsubscribe_calls == 0,
         "Fired startup listener removes only its manager-side stale handle",
     )
     check(
@@ -3447,7 +5451,7 @@ async def check_startup_listener_lifecycle() -> int:
     )
     await manager.async_stop()
     check(
-        hass.bus.normal_unsubscribe_calls == 2 and hass.bus.once_unsubscribe_calls == 0,
+        hass.bus.normal_unsubscribe_calls == 3 and hass.bus.once_unsubscribe_calls == 0,
         "Manager stop must not unsubscribe a fired one-time listener again",
     )
     check(
@@ -3475,6 +5479,9 @@ async def check_startup_listener_lifecycle() -> int:
 
     class RunningHass:
         state = manager_module.CoreState.running
+
+        def __init__(self) -> None:
+            self.bus = LifecycleBus()
 
         def async_create_task(self, coroutine: Any, *, eager_start: bool) -> Any:
             return asyncio.create_task(coroutine)
@@ -3602,6 +5609,126 @@ async def check_retry_backoff_resets_after_success() -> int:
     return 2
 
 
+async def check_dashboard_source_audit() -> int:
+    """A missed Lovelace event is detected without polling every target."""
+    manager = manager_module.PlatformSyncManager(
+        SimpleNamespace(),
+        SimpleNamespace(
+            enabled=True,
+            source_kind=const.SourceKind.DASHBOARD,
+            source_pages=(("lovelace", "default-view"),),
+        ),
+    )
+    reasons: list[str] = []
+    manager.schedule = reasons.append
+    stable = models.SourceSnapshot(
+        frozenset({"light.one"}), source_revision="stable"
+    )
+    changed = models.SourceSnapshot(
+        frozenset({"light.one", "camera.new"}), source_revision="changed"
+    )
+    manager.state.source_fingerprint = stable.fingerprint
+    snapshots = [stable, changed]
+
+    async def read_source(_hass: Any, _config: Any) -> Any:
+        return snapshots.pop(0)
+
+    original_read = manager_module.async_read_source
+    manager_module.async_read_source = read_source
+    try:
+        await manager._handle_source_audit(None)
+        check(reasons == [], "Unchanged dashboard audit performs no target work")
+        await manager._handle_source_audit(None)
+        check(
+            reasons == ["source_revision_audit"],
+            "Changed dashboard fingerprint schedules one reconciliation",
+        )
+
+        async def failed_read(_hass: Any, _config: Any) -> Any:
+            raise RuntimeError("dashboard unavailable")
+
+        manager_module.async_read_source = failed_read
+        await manager._handle_source_audit(None)
+        check(
+            reasons[-1] == "source_revision_audit_error",
+            "Dashboard audit failures enter the bounded reconcile retry path",
+        )
+    finally:
+        manager_module.async_read_source = original_read
+    reasons.clear()
+    manager._handle_event(
+        SimpleNamespace(
+            event_type="lovelace_updated", data={"url_path": "family-summary"}
+        )
+    )
+    check(reasons == [], "Unselected dashboard events do not read target platforms")
+    manager._handle_event(
+        SimpleNamespace(event_type="lovelace_updated", data={"url_path": "lovelace"})
+    )
+    check(reasons == ["lovelace_updated"], "Selected dashboard events reconcile")
+    manager._handle_event(
+        SimpleNamespace(event_type="lovelace_updated", data={"url_path": None})
+    )
+    check(
+        reasons == ["lovelace_updated", "lovelace_updated"],
+        "Legacy default dashboard events map to lovelace",
+    )
+    manager._registry_watch_entity_ids = frozenset({"camera.source"})
+    manager._registry_watch_device_ids = frozenset({"source-device"})
+    manager._handle_event(
+        SimpleNamespace(
+            event_type="entity_registry_updated",
+            data={"entity_id": "sensor.unrelated"},
+        )
+    )
+    manager._handle_event(
+        SimpleNamespace(
+            event_type="device_registry_updated",
+            data={
+                "action": "update",
+                "device_id": "unrelated-device",
+                "changes": {"name_by_user": "old name"},
+            },
+        )
+    )
+    check(
+        reasons == ["lovelace_updated", "lovelace_updated"],
+        "Unrelated registry churn does not trigger a full reconciliation",
+    )
+    manager._handle_event(
+        SimpleNamespace(
+            event_type="entity_registry_updated",
+            data={"entity_id": "camera.source"},
+        )
+    )
+    manager._handle_event(
+        SimpleNamespace(
+            event_type="device_registry_updated",
+            data={"device_id": "source-device"},
+        )
+    )
+    manager._handle_event(
+        SimpleNamespace(
+            event_type="device_registry_updated",
+            data={
+                "action": "update",
+                "device_id": "new-apple-tv-device",
+                "changes": {"config_entries": ()},
+            },
+        )
+    )
+    check(
+        reasons[-3:]
+        == [
+            "entity_registry_updated",
+            "device_registry_updated",
+            "device_registry_updated",
+        ],
+        "Selected provenance and newly changed Apple TV associations still reconcile",
+    )
+    return 9
+
+
 def check_source_events_preserve_fault_backoff() -> int:
     """A 15-second source poll cannot collapse a longer fault backoff."""
 
@@ -3638,6 +5765,9 @@ async def check_matter_startup_recovery_grace() -> int:
     class StartupBus:
         def __init__(self) -> None:
             self.started_callback: Any = None
+
+        def async_listen(self, _event: str, _callback: Any) -> Any:
+            return lambda: None
 
         def async_listen_once(self, event: str, callback: Any) -> Any:
             check(
@@ -3868,6 +5998,45 @@ async def check_matter_recovery_episode_and_cooldown() -> int:
     )
     check(blocked is None, "Non-recoverable Matterbridge states never restart")
     return 6
+
+
+def check_matter_transaction_restart_is_not_recovery_throttled() -> int:
+    """Back-to-back exact removals do not consume the recovery cooldown."""
+    manager = manager_module.PlatformSyncManager(
+        SimpleNamespace(data={}),
+        SimpleNamespace(
+            enabled=True,
+            matter_host="matterbridge.test",
+            matter_port=8283,
+        ),
+    )
+    for index in range(2):
+        check(
+            manager._reserve_matter_transaction_restart(),
+            f"normal removal {index + 1} reserves its restart before the write",
+        )
+        check(
+            manager._before_matter_process_restart(),
+            f"normal removal {index + 1} consumes its own restart reservation",
+        )
+    check(
+        manager._matter_recovery_guard.last_attempt is None
+        and not manager._matter_recovery_guard.process_restart_attempted,
+        "normal removal restarts do not consume or arm the recovery cooldown",
+    )
+
+    check(
+        manager._before_matter_process_restart(),
+        "a separate runtime recovery can still reserve its guarded restart",
+    )
+    recovery_timestamp = manager._matter_recovery_guard.last_attempt
+    check(
+        manager._reserve_matter_transaction_restart()
+        and manager._before_matter_process_restart()
+        and manager._matter_recovery_guard.last_attempt == recovery_timestamp,
+        "a later normal removal remains legal during a recovery cooldown",
+    )
+    return 7
 
 
 async def check_matter_apply_restart_guard_across_reload() -> int:
@@ -4173,6 +6342,1424 @@ class TransactionBus:
 
     def async_fire(self, event: str, data: Any) -> None:
         self.events.append((event, data))
+
+
+class LifecycleConfigEntries:
+    """Mutable Config Entry registry for manager lifecycle acceptance tests."""
+
+    def __init__(self, profile: FakeEntry, homekit_entries: list[FakeEntry]) -> None:
+        self.profile = profile
+        self.homekit_entries = homekit_entries
+        self.updated: list[tuple[str, dict[str, Any]]] = []
+
+    def async_entries(self, domain: str) -> list[FakeEntry]:
+        if domain == "homekit":
+            return list(self.homekit_entries)
+        if domain == const.DOMAIN:
+            return [self.profile]
+        return []
+
+    def async_get_entry(self, entry_id: str) -> FakeEntry | None:
+        if entry_id == self.profile.entry_id:
+            return self.profile
+        return next(
+            (
+                entry
+                for entry in self.homekit_entries
+                if entry.entry_id == entry_id
+            ),
+            None,
+        )
+
+    def async_update_entry(
+        self, entry: FakeEntry, *, options: dict[str, Any]
+    ) -> None:
+        entry.options = deepcopy(options)
+        self.updated.append((entry.entry_id, deepcopy(options)))
+
+
+def lifecycle_manager_fixture(
+    *,
+    enabled: bool = True,
+    managed: tuple[str, ...] = ("main",),
+    lifecycle: tuple[str, ...] = (),
+    pending: tuple[str, ...] = (),
+    restart_required: tuple[str, ...] = (),
+    homekit_entries: list[FakeEntry] | None = None,
+    core_state: Any = None,
+) -> tuple[Any, FakeEntry, Any]:
+    """Build one real SyncConfig plus mutable Config Entry ledger."""
+    data = {
+        const.CONF_SOURCE_KIND: const.SourceKind.MANUAL.value,
+        const.CONF_TARGET_PLATFORMS: [const.TargetPlatform.HOMEKIT.value],
+    }
+    options = {
+        const.CONF_ENABLED: enabled,
+        const.CONF_SOURCE_ENTITIES: [],
+        const.CONF_HOMEKIT_MANAGED_ENTRY_IDS: list(managed),
+        const.CONF_HOMEKIT_MAIN_ENTRY_ID: "main",
+        const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS: list(lifecycle),
+        const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS: list(pending),
+        const.CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS: list(restart_required),
+    }
+    profile = FakeEntry(
+        "platform-sync-profile",
+        domain=const.DOMAIN,
+        data=data,
+        options=options,
+    )
+    entries = homekit_entries or [
+        FakeEntry(
+            "main",
+            options={
+                "mode": "bridge",
+                "filter": {"include_entities": []},
+            },
+        )
+    ]
+    config_entries = LifecycleConfigEntries(profile, entries)
+    hass = SimpleNamespace(
+        bus=TransactionBus(),
+        config=SimpleNamespace(language="en"),
+        config_entries=config_entries,
+        data={},
+        state=(
+            manager_module.CoreState.running
+            if core_state is None
+            else core_state
+        ),
+        states=SimpleNamespace(
+            get=lambda entity_id: SimpleNamespace(
+                entity_id=entity_id,
+                attributes={"friendly_name": entity_id},
+            )
+        ),
+    )
+    config = runtime_config_module.SyncConfig.from_entry(data, options)
+    return hass, profile, config
+
+
+def check_homekit_selected_pairing_requirements() -> int:
+    """Selected unpaired entries are listed even without a pending ledger row."""
+
+    def pairing_runtime(paired: bool) -> Any:
+        return SimpleNamespace(
+            homekit=SimpleNamespace(
+                driver=SimpleNamespace(
+                    state=SimpleNamespace(
+                        paired_clients={"controller": object()} if paired else {}
+                    )
+                )
+            )
+        )
+
+    main = FakeEntry(
+        "main",
+        options={
+            "mode": "bridge",
+            "filter": {"include_entities": ["light.one", "light.two"]},
+        },
+        runtime_data=pairing_runtime(True),
+    )
+    wanted = FakeEntry(
+        "wanted-side",
+        source="accessory",
+        options={
+            "mode": "accessory",
+            "filter": {"include_entities": ["camera.wanted"]},
+        },
+        runtime_data=pairing_runtime(False),
+    )
+    stale = FakeEntry(
+        "stale-side",
+        source="accessory",
+        options={
+            "mode": "accessory",
+            "filter": {"include_entities": ["camera.stale"]},
+        },
+        runtime_data=pairing_runtime(False),
+    )
+    hass, profile, config = lifecycle_manager_fixture(
+        managed=("main", "wanted-side", "stale-side"),
+        lifecycle=("wanted-side", "stale-side"),
+        pending=(),
+        homekit_entries=[main, wanted, stale],
+    )
+    manager = manager_module.PlatformSyncManager(hass, config, profile)
+    requirements = manager._pairing_requirements(
+        frozenset({"light.one", "light.two", "camera.wanted"})
+    )
+    check(
+        [item.entity_id for item in requirements] == ["camera.wanted"],
+        "an adopted unpaired desired accessory is listed while a stale prune target is not",
+    )
+
+    main.runtime_data = pairing_runtime(False)
+    main.options["filter"]["include_entities"] = ["light.one"]
+    requirements = manager._pairing_requirements(
+        frozenset({"light.one", "camera.wanted"})
+    )
+    check(
+        {item.entity_id for item in requirements}
+        == {"config_entry:main", "camera.wanted"},
+        "an unpaired one-entity main Bridge is still listed as one Bridge pairing action",
+    )
+
+    manager._update_homekit_tracking(add_pending_pairing_ids={"wanted-side"})
+    wanted.runtime_data = pairing_runtime(True)
+    main.runtime_data = pairing_runtime(True)
+    requirements = manager._pairing_requirements(
+        frozenset({"light.one", "light.two", "camera.wanted"})
+    )
+    check(
+        requirements == []
+        and profile.options[const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS] == [],
+        "a paired selected accessory clears its durable pending marker",
+    )
+    return 3
+
+
+async def check_homekit_prune_confirmation_identity() -> int:
+    """Every prune-candidate identity field participates in confirmation."""
+    manager = manager_module.PlatformSyncManager(
+        SimpleNamespace(), SimpleNamespace(enabled=True)
+    )
+    base = SimpleNamespace(
+        entry_id="side-entry",
+        entity_id="camera.stairs",
+        imported=False,
+        name="Stairs Camera",
+        port=21064,
+        mode="accessory",
+        yaml_relative_path=None,
+    )
+    check(
+        manager._homekit_prune_confirmed("source-a", (base,), apply=True)
+        is False,
+        "A first prune observation never confirms deletion",
+    )
+    variants = (
+        ("entry ID", {"entry_id": "replacement-entry"}),
+        ("entity ID", {"entity_id": "camera.replacement"}),
+        ("import provenance", {"imported": True}),
+        ("name", {"name": "Replacement Camera"}),
+        ("port", {"port": 21065}),
+        ("mode", {"mode": "bridge"}),
+        ("YAML path", {"yaml_relative_path": "other-homekit.yaml"}),
+    )
+    base_values = vars(base)
+    for label, change in variants:
+        manager._homekit_prune_first_seen = (
+            asyncio.get_running_loop().time()
+            - manager_module.INTERNAL_LIFECYCLE_CONFIRM_SECONDS
+            - 1
+        )
+        variant = SimpleNamespace(**{**base_values, **change})
+        check(
+            manager._homekit_prune_confirmed(
+                "source-a", (variant,), apply=True
+            )
+            is False,
+            f"A changed prune candidate {label} resets confirmation",
+        )
+        # Restore a known base signature before testing the next single field.
+        manager._homekit_prune_confirmed("source-a", (base,), apply=True)
+
+    manager._homekit_prune_first_seen = (
+        asyncio.get_running_loop().time()
+        - manager_module.INTERNAL_LIFECYCLE_CONFIRM_SECONDS
+        - 1
+    )
+    check(
+        manager._homekit_prune_confirmed("source-b", (base,), apply=True)
+        is False,
+        "A changed source fingerprint resets prune confirmation",
+    )
+    manager._homekit_prune_first_seen = (
+        asyncio.get_running_loop().time()
+        - manager_module.INTERNAL_LIFECYCLE_CONFIRM_SECONDS
+        - 1
+    )
+    check(
+        manager._homekit_prune_confirmed("source-b", (base,), apply=True)
+        is True,
+        "Two identical full prune identities separated by the hold time confirm",
+    )
+    manager._clear_homekit_prune_confirmation()
+    return 10
+
+
+async def check_homekit_lifecycle_progress_persistence() -> int:
+    """Partial prune progress is durable before errors or cancellation escape."""
+
+    async def run_scenario(cancelled: bool) -> tuple[Any, FakeEntry, list[bool]]:
+        main = FakeEntry(
+            "main",
+            options={"mode": "bridge", "filter": {"include_entities": []}},
+        )
+        removed = FakeEntry(
+            "side-removed",
+            options={
+                "mode": "accessory",
+                "filter": {"include_entities": ["camera.removed"]},
+            },
+        )
+        absent = FakeEntry(
+            "side-absent",
+            options={
+                "mode": "accessory",
+                "filter": {"include_entities": ["camera.absent"]},
+            },
+        )
+        hass, profile, config = lifecycle_manager_fixture(
+            managed=(main.entry_id, removed.entry_id, absent.entry_id),
+            lifecycle=(removed.entry_id, absent.entry_id),
+            pending=(removed.entry_id, absent.entry_id),
+            homekit_entries=[main, removed, absent],
+        )
+        candidates = (
+            SimpleNamespace(
+                entry_id=removed.entry_id,
+                entity_id="camera.removed",
+                imported=False,
+                name="Removed",
+                port=21064,
+                yaml_relative_path=None,
+            ),
+            SimpleNamespace(
+                entry_id=absent.entry_id,
+                entity_id="camera.absent",
+                imported=False,
+                name="Absent",
+                port=21065,
+                yaml_relative_path=None,
+            ),
+        )
+        current = frozenset(candidate.entity_id for candidate in candidates)
+        published: list[bool] = []
+
+        async def read_source(_hass: Any, _config: Any) -> Any:
+            return models.SourceSnapshot(
+                entities=frozenset(),
+                source_revision="lifecycle-partial-progress",
+            )
+
+        async def find_apple_tv(_hass: Any) -> frozenset[str]:
+            return frozenset()
+
+        async def read_target(
+            _hass: Any, _config: Any, _platform: Any
+        ) -> frozenset[str]:
+            return current
+
+        async def validate_target(
+            _hass: Any,
+            _config: Any,
+            _platform: Any,
+            _expected: Any,
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
+            return {"loaded": True}
+
+        async def remove_candidates(
+            _hass: Any, _candidates: Any, **_kwargs: Any
+        ) -> Any:
+            hass.config_entries.homekit_entries[:] = [main]
+            kwargs = {
+                "removed_entry_ids": {removed.entry_id},
+                "removed_entities": {"camera.removed"},
+                "already_absent_entry_ids": set(),
+                "restart_required_entry_ids": {removed.entry_id},
+                "uncertain_entry_ids": {absent.entry_id},
+                "yaml_backup_paths": ("backup/homekit.yaml",),
+            }
+            if cancelled:
+                raise manager_module.HomeKitLifecycleCancelled(
+                    "cancelled after verified progress", **kwargs
+                )
+            raise manager_module.HomeKitLifecycleError(
+                "failed after verified progress", **kwargs
+            )
+
+        async def unexpected_prepare(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("A retained prune candidate must not be prepared")
+
+        async def unexpected_apply(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("A retained prune candidate must not be applied")
+
+        originals = (
+            manager_module.async_read_source,
+            manager_module.async_find_apple_tv_entities,
+            manager_module.async_read_target,
+            manager_module.async_validate_target,
+            manager_module.homekit_new_accessory_mode_entities,
+            manager_module.async_remove_homekit_accessory_candidates,
+            manager_module.async_prepare_target,
+            manager_module.async_apply_plan,
+        )
+        manager_module.async_read_source = read_source
+        manager_module.async_find_apple_tv_entities = find_apple_tv
+        manager_module.async_read_target = read_target
+        manager_module.async_validate_target = validate_target
+        manager_module.homekit_new_accessory_mode_entities = (
+            lambda *_args, **_kwargs: frozenset()
+        )
+        manager_module.async_remove_homekit_accessory_candidates = remove_candidates
+        manager_module.async_prepare_target = unexpected_prepare
+        manager_module.async_apply_plan = unexpected_apply
+        manager = manager_module.PlatformSyncManager(hass, config, profile)
+        manager._homekit_prune_candidates = lambda _desired: candidates
+        manager._homekit_prune_confirmed = (
+            lambda _fingerprint, _candidates, *, apply: apply
+        )
+        manager._publish_homekit_restart_requirement = published.append
+        manager._publish_pairing_requirements = lambda _requirements: None
+        try:
+            if cancelled:
+                try:
+                    await manager.async_reconcile(
+                        reason="lifecycle_cancelled", apply=True
+                    )
+                except manager_module.HomeKitLifecycleCancelled:
+                    pass
+                else:
+                    raise AssertionError("Lifecycle cancellation must propagate")
+            else:
+                logger_disabled = manager_module._LOGGER.disabled
+                manager_module._LOGGER.disabled = True
+                try:
+                    try:
+                        await manager.async_reconcile(
+                            reason="lifecycle_error", apply=True
+                        )
+                    except manager_module.HomeKitLifecycleError:
+                        pass
+                    else:
+                        raise AssertionError("Lifecycle error must propagate")
+                finally:
+                    manager_module._LOGGER.disabled = logger_disabled
+        finally:
+            (
+                manager_module.async_read_source,
+                manager_module.async_find_apple_tv_entities,
+                manager_module.async_read_target,
+                manager_module.async_validate_target,
+                manager_module.homekit_new_accessory_mode_entities,
+                manager_module.async_remove_homekit_accessory_candidates,
+                manager_module.async_prepare_target,
+                manager_module.async_apply_plan,
+            ) = originals
+        return manager, profile, published
+
+    for cancelled in (True, False):
+        manager, profile, published = await run_scenario(cancelled)
+        check(
+            profile.options[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+            == ["main", "side-absent"]
+            and profile.options[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS]
+            == ["side-absent"]
+            and profile.options[const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS]
+            == ["side-absent"],
+            "Partial lifecycle progress removes only confirmed IDs and retains uncertain ownership",
+        )
+        check(
+            profile.options[const.CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS]
+            == ["side-absent", "side-removed"]
+            and manager.state.homekit_restart_required is True,
+            "Partial lifecycle progress persists confirmed-restart and uncertain-removal markers before propagation",
+        )
+        check(
+            manager.state.homekit_yaml_backups == ["backup/homekit.yaml"]
+            and published == [True],
+            "Partial lifecycle progress preserves backup evidence and publishes the restart gate",
+        )
+        blocked = await manager.async_reconcile(
+            reason="uncertain_lifecycle_followup", apply=True
+        )
+        check(
+            blocked["status"] == "homekit_restart_required"
+            and profile.options[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS]
+            == ["side-absent"],
+            "A same-process follow-up is restart-gated before live absence can drop uncertain ownership",
+        )
+    return 8
+
+
+async def check_homekit_restart_required_postcommit() -> int:
+    """A successful prune requiring restart stops all same-turn lifecycle work."""
+    main = FakeEntry(
+        "main",
+        options={"mode": "bridge", "filter": {"include_entities": []}},
+    )
+    old = FakeEntry(
+        "old-side",
+        options={
+            "mode": "accessory",
+            "filter": {"include_entities": ["camera.old"]},
+        },
+    )
+    hass, profile, config = lifecycle_manager_fixture(
+        managed=(main.entry_id, old.entry_id),
+        lifecycle=(old.entry_id,),
+        homekit_entries=[main, old],
+    )
+    candidate = SimpleNamespace(
+        entry_id=old.entry_id,
+        entity_id="camera.old",
+        imported=False,
+        name="Old Camera",
+        port=21064,
+        yaml_relative_path=None,
+    )
+    actual = frozenset({"camera.old"})
+    reads = 0
+    validations = 0
+    creates = 0
+
+    async def read_source(_hass: Any, _config: Any) -> Any:
+        return models.SourceSnapshot(
+            entities=frozenset({"camera.new"}),
+            source_revision="restart-required",
+        )
+
+    async def find_apple_tv(_hass: Any) -> frozenset[str]:
+        return frozenset()
+
+    async def read_target(
+        _hass: Any, _config: Any, _platform: Any
+    ) -> frozenset[str]:
+        nonlocal reads
+        reads += 1
+        return actual
+
+    async def validate_target(
+        _hass: Any,
+        _config: Any,
+        _platform: Any,
+        _expected: Any,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        nonlocal validations
+        validations += 1
+        return {"loaded": True, "controller_verified": False}
+
+    async def remove_candidates(
+        _hass: Any, _candidates: Any, **_kwargs: Any
+    ) -> Any:
+        nonlocal actual
+        actual = frozenset()
+        hass.config_entries.homekit_entries[:] = [main]
+        return SimpleNamespace(
+            removed_entry_ids=frozenset({old.entry_id}),
+            already_absent_entry_ids=frozenset(),
+            restart_required_entry_ids=frozenset({old.entry_id}),
+            yaml_backup_paths=("backup/old-side.yaml",),
+        )
+
+    async def create_accessory(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal creates
+        creates += 1
+        raise AssertionError("A restart-gated turn cannot create an accessory")
+
+    async def unexpected_prepare(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("Temporary HomeKit desired set should already be exact")
+
+    async def unexpected_apply(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("Temporary HomeKit desired set should already be exact")
+
+    originals = (
+        manager_module.async_read_source,
+        manager_module.async_find_apple_tv_entities,
+        manager_module.async_read_target,
+        manager_module.async_validate_target,
+        manager_module.homekit_new_accessory_mode_entities,
+        manager_module.async_remove_homekit_accessory_candidates,
+        manager_module.async_create_homekit_accessory,
+        manager_module.async_prepare_target,
+        manager_module.async_apply_plan,
+    )
+    manager_module.async_read_source = read_source
+    manager_module.async_find_apple_tv_entities = find_apple_tv
+    manager_module.async_read_target = read_target
+    manager_module.async_validate_target = validate_target
+    manager_module.homekit_new_accessory_mode_entities = (
+        lambda *_args, **_kwargs: frozenset({"camera.new"})
+    )
+    manager_module.async_remove_homekit_accessory_candidates = remove_candidates
+    manager_module.async_create_homekit_accessory = create_accessory
+    manager_module.async_prepare_target = unexpected_prepare
+    manager_module.async_apply_plan = unexpected_apply
+    manager = manager_module.PlatformSyncManager(hass, config, profile)
+    manager._homekit_prune_candidates = lambda _desired: (candidate,)
+    manager._homekit_prune_confirmed = (
+        lambda _fingerprint, _candidates, *, apply: apply
+    )
+    manager._publish_homekit_restart_requirement = lambda _required: None
+    manager._publish_pairing_requirements = lambda _requirements: None
+    try:
+        result = await manager.async_reconcile(
+            reason="restart_required_postcommit", apply=True
+        )
+    finally:
+        (
+            manager_module.async_read_source,
+            manager_module.async_find_apple_tv_entities,
+            manager_module.async_read_target,
+            manager_module.async_validate_target,
+            manager_module.homekit_new_accessory_mode_entities,
+            manager_module.async_remove_homekit_accessory_candidates,
+            manager_module.async_create_homekit_accessory,
+            manager_module.async_prepare_target,
+            manager_module.async_apply_plan,
+        ) = originals
+    check(
+        result["status"] == "homekit_restart_required"
+        and result["homekit_restart_required"] is True,
+        "A verified prune requiring restart cannot report synchronized",
+    )
+    check(
+        reads == 2 and validations == 1,
+        "Restart-required readback skips the post-lifecycle exact runtime validator",
+    )
+    check(
+        creates == 0
+        and "camera.new"
+        not in profile.options[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS],
+        "Restart-required reconciliation defers all new accessory creation",
+    )
+    check(
+        profile.options[const.CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS]
+        == [old.entry_id]
+        and result["plans"]["homekit"]["runtime"]["restart_required"]
+        is True,
+        "Restart ledger and diagnostics retain the exact removed entry marker",
+    )
+    return 4
+
+
+async def check_homekit_pending_prune_defers_accessory_creation() -> int:
+    """Pending prune confirmation blocks creation until topology is safe."""
+    main = FakeEntry(
+        "main",
+        options={
+            "mode": "bridge",
+            "filter": {"include_entities": ["light.old"]},
+        },
+    )
+    old = FakeEntry(
+        "old-side",
+        source="accessory",
+        options={
+            "mode": "accessory",
+            "filter": {"include_entities": ["camera.old"]},
+        },
+    )
+    hass, profile, config = lifecycle_manager_fixture(
+        managed=(main.entry_id, old.entry_id),
+        lifecycle=(old.entry_id,),
+        homekit_entries=[main, old],
+    )
+    candidate = SimpleNamespace(
+        entry_id=old.entry_id,
+        entity_id="camera.old",
+        imported=False,
+        name="Old Camera",
+        port=21064,
+        mode="accessory",
+        yaml_relative_path=None,
+    )
+    actual = frozenset({"light.old", "camera.old"})
+    validation_allowances: list[frozenset[str]] = []
+    lifecycle_calls: list[str] = []
+
+    async def read_source(_hass: Any, _config: Any) -> Any:
+        return models.SourceSnapshot(
+            entities=frozenset({"light.new", "camera.new"}),
+            source_revision="pending-prune-before-create",
+        )
+
+    async def find_apple_tv(_hass: Any) -> frozenset[str]:
+        return frozenset()
+
+    async def read_target(
+        _hass: Any, _config: Any, _platform: Any
+    ) -> frozenset[str]:
+        return actual
+
+    async def validate_target(
+        _hass: Any,
+        _config: Any,
+        _platform: Any,
+        _expected: Any,
+        *,
+        allowed_nonrunning_homekit_entry_ids: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        validation_allowances.append(allowed_nonrunning_homekit_entry_ids)
+        old_is_live = old in hass.config_entries.homekit_entries
+        if old_is_live:
+            check(
+                allowed_nonrunning_homekit_entry_ids
+                == frozenset({old.entry_id}),
+                "A non-running pending prune entry has the exact runtime allowance",
+            )
+        else:
+            check(
+                not allowed_nonrunning_homekit_entry_ids,
+                "The final post-prune validator has no runtime allowance",
+            )
+        return {
+            "loaded": True,
+            "runtime_verified": not old_is_live,
+            "runtime_pending_prune_entries": int(old_is_live),
+        }
+
+    async def prepare_target(
+        _hass: Any, _config: Any, platform: Any
+    ) -> Any:
+        return targets.TargetBackup(platform=platform, payload=actual)
+
+    async def apply_target(
+        _hass: Any,
+        _config: Any,
+        plan: Any,
+        _rooms: Any,
+        **_kwargs: Any,
+    ) -> bool:
+        nonlocal actual
+        actual = plan.desired
+        return False
+
+    async def unexpected_restore(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("The successful pending-prune path must not roll back")
+
+    async def remove_candidates(
+        _hass: Any, candidates: Any, **_kwargs: Any
+    ) -> Any:
+        nonlocal actual
+        lifecycle_calls.append("prune")
+        check(
+            tuple(candidates) == (candidate,),
+            "The confirmed prune removes only its exact candidate",
+        )
+        hass.config_entries.homekit_entries.remove(old)
+        actual -= frozenset({"camera.old"})
+        return SimpleNamespace(
+            removed_entry_ids=frozenset({old.entry_id}),
+            already_absent_entry_ids=frozenset(),
+            restart_required_entry_ids=frozenset(),
+            uncertain_entry_ids=frozenset(),
+            yaml_backup_paths=(),
+        )
+
+    async def create_accessory(_hass: Any, entity_id: str) -> Any:
+        nonlocal actual
+        lifecycle_calls.append("create")
+        check(
+            entity_id == "camera.new"
+            and old not in hass.config_entries.homekit_entries,
+            "Deferred creation starts only after the stale side entry is gone",
+        )
+        created = FakeEntry(
+            "new-side",
+            source="accessory",
+            options={
+                "mode": "accessory",
+                "filter": {"include_entities": [entity_id]},
+            },
+        )
+        hass.config_entries.homekit_entries.append(created)
+        actual |= frozenset({entity_id})
+        return created, None
+
+    originals = (
+        manager_module.async_read_source,
+        manager_module.async_find_apple_tv_entities,
+        manager_module.async_read_target,
+        manager_module.async_validate_target,
+        manager_module.async_prepare_target,
+        manager_module.async_apply_plan,
+        manager_module.async_restore_target,
+        manager_module.homekit_new_accessory_mode_entities,
+        manager_module.async_remove_homekit_accessory_candidates,
+        manager_module.async_create_homekit_accessory,
+    )
+    manager_module.async_read_source = read_source
+    manager_module.async_find_apple_tv_entities = find_apple_tv
+    manager_module.async_read_target = read_target
+    manager_module.async_validate_target = validate_target
+    manager_module.async_prepare_target = prepare_target
+    manager_module.async_apply_plan = apply_target
+    manager_module.async_restore_target = unexpected_restore
+    manager_module.homekit_new_accessory_mode_entities = (
+        lambda *_args, **_kwargs: frozenset({"camera.new"})
+    )
+    manager_module.async_remove_homekit_accessory_candidates = remove_candidates
+    manager_module.async_create_homekit_accessory = create_accessory
+    manager = manager_module.PlatformSyncManager(hass, config, profile)
+    manager._homekit_prune_candidates = lambda _desired: (candidate,)
+    manager._publish_homekit_restart_requirement = lambda _required: None
+    manager._publish_pairing_requirements = lambda _requirements: None
+    try:
+        pending_result = await manager.async_reconcile(
+            reason="pending_prune", apply=True
+        )
+        check(
+            pending_result["status"] == "pending_confirmation"
+            and lifecycle_calls == [],
+            "The first pending-prune turn performs neither prune nor creation",
+        )
+        check(
+            actual == frozenset({"light.new", "camera.old"})
+            and validation_allowances
+            == [frozenset({old.entry_id}), frozenset({old.entry_id})],
+            "The reversible main update validates around the retained candidate",
+        )
+
+        manager._homekit_prune_first_seen = (
+            asyncio.get_running_loop().time()
+            - manager_module.INTERNAL_LIFECYCLE_CONFIRM_SECONDS
+            - 1
+        )
+        completed_result = await manager.async_reconcile(
+            reason="confirmed_prune", apply=True
+        )
+    finally:
+        (
+            manager_module.async_read_source,
+            manager_module.async_find_apple_tv_entities,
+            manager_module.async_read_target,
+            manager_module.async_validate_target,
+            manager_module.async_prepare_target,
+            manager_module.async_apply_plan,
+            manager_module.async_restore_target,
+            manager_module.homekit_new_accessory_mode_entities,
+            manager_module.async_remove_homekit_accessory_candidates,
+            manager_module.async_create_homekit_accessory,
+        ) = originals
+
+    check(
+        lifecycle_calls == ["prune", "create"],
+        "The confirmed turn prunes before creating the replacement accessory",
+    )
+    check(
+        completed_result["status"] == "synced_manual_pairing_required"
+        and actual == frozenset({"light.new", "camera.new"}),
+        "Confirmed prune and deferred creation converge to the logical set",
+    )
+    check(
+        validation_allowances
+        == [
+            frozenset({old.entry_id}),
+            frozenset({old.entry_id}),
+            frozenset({old.entry_id}),
+            frozenset(),
+        ],
+        "The runtime allowance exists only while the prune candidate remains live",
+    )
+    check(
+        profile.options[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+        == ["main", "new-side"]
+        and profile.options[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS]
+        == ["new-side"]
+        and old not in hass.config_entries.homekit_entries,
+        "Ownership moves from the pruned side entry to the created replacement",
+    )
+    return 6
+
+
+async def check_homekit_restart_marker_startup_scope() -> int:
+    """Only a new Core process clears the persisted HomeKit restart gate."""
+    main = FakeEntry(
+        "main",
+        options={"mode": "bridge", "filter": {"include_entities": ["light.one"]}},
+    )
+    starting_hass, starting_profile, starting_config = lifecycle_manager_fixture(
+        enabled=False,
+        managed=("main", "uncertain-side"),
+        lifecycle=("uncertain-side",),
+        pending=("uncertain-side",),
+        restart_required=("uncertain-side",),
+        homekit_entries=[main],
+        core_state=manager_module.CoreState.starting,
+    )
+    starting_manager = manager_module.PlatformSyncManager(
+        starting_hass, starting_config, starting_profile
+    )
+    starting_published: list[bool] = []
+    starting_manager._publish_homekit_restart_requirement = (
+        starting_published.append
+    )
+    starting_manager._publish_pairing_requirements = lambda _requirements: None
+    await starting_manager.async_start()
+    check(
+        starting_profile.options[
+            const.CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS
+        ]
+        == []
+        and starting_profile.options[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+        == ["main"]
+        and starting_profile.options[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS]
+        == []
+        and starting_profile.options[const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS]
+        == []
+        and starting_manager.state.homekit_restart_required is False
+        and starting_published == [False],
+        "A full Core startup uses durable absence to clear uncertain ownership and the restart marker",
+    )
+
+    resurrected = FakeEntry(
+        "uncertain-side",
+        source="accessory",
+        options={
+            "mode": "accessory",
+            "filter": {"include_entities": ["camera.uncertain"]},
+        },
+    )
+    live_hass, live_profile, live_config = lifecycle_manager_fixture(
+        enabled=False,
+        managed=("main", "uncertain-side"),
+        lifecycle=("uncertain-side",),
+        pending=("uncertain-side",),
+        restart_required=("uncertain-side",),
+        homekit_entries=[main, resurrected],
+        core_state=manager_module.CoreState.starting,
+    )
+    live_manager = manager_module.PlatformSyncManager(
+        live_hass, live_config, live_profile
+    )
+    live_manager._publish_homekit_restart_requirement = lambda _required: None
+    live_manager._publish_pairing_requirements = lambda _requirements: None
+    await live_manager.async_start()
+    check(
+        live_profile.options[const.CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS]
+        == []
+        and live_profile.options[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+        == ["main", "uncertain-side"]
+        and live_profile.options[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS]
+        == ["uncertain-side"],
+        "A Config Entry resurrected from storage keeps lifecycle ownership for a safe retry",
+    )
+
+    running_hass, running_profile, running_config = lifecycle_manager_fixture(
+        enabled=False,
+        managed=("main", "uncertain-side"),
+        lifecycle=("uncertain-side",),
+        pending=("uncertain-side",),
+        restart_required=("uncertain-side",),
+        homekit_entries=[main],
+        core_state=manager_module.CoreState.running,
+    )
+    running_manager = manager_module.PlatformSyncManager(
+        running_hass, running_config, running_profile
+    )
+    running_published: list[bool] = []
+    running_manager._publish_homekit_restart_requirement = running_published.append
+    running_manager._publish_pairing_requirements = lambda _requirements: None
+    await running_manager.async_start()
+    check(
+        running_profile.options[
+            const.CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS
+        ]
+        == ["uncertain-side"]
+        and running_profile.options[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+        == ["main", "uncertain-side"]
+        and running_profile.options[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS]
+        == ["uncertain-side"]
+        and running_manager.state.homekit_restart_required is True
+        and running_published == [True],
+        "A same-process Config Entry reload preserves uncertain ownership and the restart gate",
+    )
+
+    # The marker can be created by a transaction while another direct/manual
+    # reconciliation is already queued on the same manager lock. The queued
+    # transaction must re-read the ledger after serialization and perform no
+    # source or target work in that same Core process.
+    queued_hass, queued_profile, queued_config = lifecycle_manager_fixture(
+        enabled=True,
+        managed=("main", "uncertain-side"),
+        lifecycle=("uncertain-side",),
+        homekit_entries=[main],
+        core_state=manager_module.CoreState.running,
+    )
+    queued_manager = manager_module.PlatformSyncManager(
+        queued_hass, queued_config, queued_profile
+    )
+    queued_manager._publish_homekit_restart_requirement = lambda _required: None
+    reads = 0
+
+    async def unexpected_source_read(*, background: bool) -> Any:
+        nonlocal reads
+        del background
+        reads += 1
+        raise AssertionError("A queued restart-gated apply must not read its source")
+
+    class GateLock:
+        def __init__(self) -> None:
+            self.waiting = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def __aenter__(self) -> None:
+            self.waiting.set()
+            await self.release.wait()
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    gate = GateLock()
+    queued_manager._lock = gate
+    queued_manager._async_read_source_with_recovery = unexpected_source_read
+    queued_task = asyncio.create_task(
+        queued_manager.async_reconcile(reason="queued_after_prune", apply=True)
+    )
+    await gate.waiting.wait()
+    queued_profile.options = {
+        **queued_profile.options,
+        const.CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS: ["uncertain-side"],
+    }
+    queued_manager.config = runtime_config_module.SyncConfig.from_entry(
+        queued_profile.data, queued_profile.options
+    )
+    gate.release.set()
+    queued_result = await queued_task
+    check(
+        queued_result["status"] == "homekit_restart_required" and reads == 0,
+        "A reconciliation queued before prune honors the restart marker after acquiring the transaction lock",
+    )
+    return 4
+
+
+async def check_homekit_create_cancellation_persistence() -> int:
+    """An attributed entry created during cancellation is owned before escape."""
+    main = FakeEntry(
+        "main",
+        options={"mode": "bridge", "filter": {"include_entities": []}},
+    )
+    hass, profile, config = lifecycle_manager_fixture(
+        homekit_entries=[main]
+    )
+
+    async def read_source(_hass: Any, _config: Any) -> Any:
+        return models.SourceSnapshot(
+            entities=frozenset({"camera.new"}),
+            source_revision="create-cancelled",
+        )
+
+    async def find_apple_tv(_hass: Any) -> frozenset[str]:
+        return frozenset()
+
+    async def read_target(
+        _hass: Any, _config: Any, _platform: Any
+    ) -> frozenset[str]:
+        return frozenset()
+
+    async def validate_target(
+        _hass: Any, _config: Any, _platform: Any, _expected: Any
+    ) -> dict[str, Any]:
+        return {"loaded": True}
+
+    async def create_accessory(_hass: Any, entity_id: str) -> Any:
+        check(entity_id == "camera.new", "The deferred camera is created exactly")
+        hass.config_entries.homekit_entries.append(
+            FakeEntry(
+                "new-side",
+                options={
+                    "mode": "accessory",
+                    "filter": {"include_entities": [entity_id]},
+                },
+            )
+        )
+        raise manager_module.HomeKitAccessoryCreateCancelled(
+            created_entry_id="new-side"
+        )
+
+    async def unexpected_prepare(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("Deferred HomeKit creation needs no reversible apply")
+
+    async def unexpected_apply(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("Deferred HomeKit creation needs no reversible apply")
+
+    originals = (
+        manager_module.async_read_source,
+        manager_module.async_find_apple_tv_entities,
+        manager_module.async_read_target,
+        manager_module.async_validate_target,
+        manager_module.homekit_new_accessory_mode_entities,
+        manager_module.async_create_homekit_accessory,
+        manager_module.async_prepare_target,
+        manager_module.async_apply_plan,
+    )
+    manager_module.async_read_source = read_source
+    manager_module.async_find_apple_tv_entities = find_apple_tv
+    manager_module.async_read_target = read_target
+    manager_module.async_validate_target = validate_target
+    manager_module.homekit_new_accessory_mode_entities = (
+        lambda *_args, **_kwargs: frozenset({"camera.new"})
+    )
+    manager_module.async_create_homekit_accessory = create_accessory
+    manager_module.async_prepare_target = unexpected_prepare
+    manager_module.async_apply_plan = unexpected_apply
+    manager = manager_module.PlatformSyncManager(hass, config, profile)
+    manager._publish_homekit_restart_requirement = lambda _required: None
+    manager._publish_pairing_requirements = lambda _requirements: None
+    try:
+        try:
+            await manager.async_reconcile(
+                reason="create_cancelled", apply=True
+            )
+        except manager_module.HomeKitAccessoryCreateCancelled:
+            pass
+        else:
+            raise AssertionError("Accessory creation cancellation must propagate")
+    finally:
+        (
+            manager_module.async_read_source,
+            manager_module.async_find_apple_tv_entities,
+            manager_module.async_read_target,
+            manager_module.async_validate_target,
+            manager_module.homekit_new_accessory_mode_entities,
+            manager_module.async_create_homekit_accessory,
+            manager_module.async_prepare_target,
+            manager_module.async_apply_plan,
+        ) = originals
+    check(
+        profile.options[const.CONF_HOMEKIT_MANAGED_ENTRY_IDS]
+        == ["main", "new-side"]
+        and profile.options[const.CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS]
+        == ["new-side"]
+        and profile.options[const.CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS]
+        == ["new-side"],
+        "Cancelled creation persists exact ownership and pairing ledgers before propagation",
+    )
+    return 2
+
+
+async def check_homekit_apple_tv_provenance_races() -> int:
+    """Apple TV provenance changes fail closed before lifecycle mutation."""
+
+    async def run_scenario(values: list[frozenset[str]]) -> tuple[str, list[Any]]:
+        main = FakeEntry(
+            "main",
+            options={
+                "mode": "bridge",
+                "filter": {"include_entities": ["light.one"]},
+            },
+        )
+        hass, profile, config = lifecycle_manager_fixture(
+            homekit_entries=[main]
+        )
+        observed_prune_desired: list[frozenset[str]] = []
+        lifecycle_calls: list[Any] = []
+
+        async def read_source(_hass: Any, _config: Any) -> Any:
+            return models.SourceSnapshot(
+                entities=frozenset({"light.one"}),
+                source_revision="apple-tv-race",
+            )
+
+        async def find_apple_tv(_hass: Any) -> frozenset[str]:
+            return values.pop(0)
+
+        async def read_target(
+            _hass: Any, _config: Any, _platform: Any
+        ) -> frozenset[str]:
+            return frozenset({"light.one"})
+
+        async def validate_target(
+            _hass: Any, _config: Any, _platform: Any, _expected: Any
+        ) -> dict[str, Any]:
+            return {"loaded": True}
+
+        async def lifecycle_mutation(*_args: Any, **_kwargs: Any) -> Any:
+            lifecycle_calls.append((_args, _kwargs))
+            raise AssertionError("A provenance race must precede lifecycle mutation")
+
+        originals = (
+            manager_module.async_read_source,
+            manager_module.async_find_apple_tv_entities,
+            manager_module.async_read_target,
+            manager_module.async_validate_target,
+            manager_module.homekit_new_accessory_mode_entities,
+            manager_module.async_remove_homekit_accessory_candidates,
+            manager_module.async_create_homekit_accessory,
+        )
+        manager_module.async_read_source = read_source
+        manager_module.async_find_apple_tv_entities = find_apple_tv
+        manager_module.async_read_target = read_target
+        manager_module.async_validate_target = validate_target
+        manager_module.homekit_new_accessory_mode_entities = (
+            lambda *_args, **_kwargs: frozenset()
+        )
+        manager_module.async_remove_homekit_accessory_candidates = (
+            lifecycle_mutation
+        )
+        manager_module.async_create_homekit_accessory = lifecycle_mutation
+        manager = manager_module.PlatformSyncManager(hass, config, profile)
+        manager._homekit_prune_candidates = lambda desired: (
+            observed_prune_desired.append(frozenset(desired)) or ()
+        )
+        manager._publish_homekit_restart_requirement = lambda _required: None
+        manager._publish_pairing_requirements = lambda _requirements: None
+        logger_disabled = manager_module._LOGGER.disabled
+        manager_module._LOGGER.disabled = True
+        try:
+            try:
+                await manager.async_reconcile(
+                    reason="apple_tv_provenance_race", apply=True
+                )
+            except RuntimeError as error:
+                message = str(error)
+            else:
+                raise AssertionError("A changed Apple TV provenance set must fail")
+        finally:
+            manager_module._LOGGER.disabled = logger_disabled
+            (
+                manager_module.async_read_source,
+                manager_module.async_find_apple_tv_entities,
+                manager_module.async_read_target,
+                manager_module.async_validate_target,
+                manager_module.homekit_new_accessory_mode_entities,
+                manager_module.async_remove_homekit_accessory_candidates,
+                manager_module.async_create_homekit_accessory,
+            ) = originals
+        check(
+            observed_prune_desired
+            == [frozenset({"light.one"})],
+            "Dynamic Apple TV exclusions remain absent from the lifecycle desired set so explicitly owned side entries can be pruned",
+        )
+        check(
+            lifecycle_calls == [],
+            "A changed Apple TV provenance set performs no lifecycle mutation",
+        )
+        return message, lifecycle_calls
+
+    planning_message, _ = await run_scenario(
+        [
+            frozenset({"media_player.apple_tv"}),
+            frozenset({"media_player.replacement"}),
+        ]
+    )
+    check(
+        "changed during planning" in planning_message,
+        "Apple TV provenance changes during planning fail closed",
+    )
+    postcommit_message, _ = await run_scenario(
+        [
+            frozenset({"media_player.apple_tv"}),
+            frozenset({"media_player.apple_tv"}),
+            frozenset({"media_player.replacement"}),
+        ]
+    )
+    check(
+        "changed before lifecycle operation" in postcommit_message,
+        "Apple TV provenance changes before post-commit lifecycle fail closed",
+    )
+    apple_side = FakeEntry(
+        "apple-tv-side",
+        data={"name": "Apple TV side", "port": 21064},
+        options={
+            "mode": "bridge",
+            "filter": {"include_entities": ["media_player.apple_tv"]},
+        },
+    )
+    prune_hass, prune_profile, prune_config = lifecycle_manager_fixture(
+        managed=("main", "apple-tv-side"),
+        lifecycle=("apple-tv-side",),
+        homekit_entries=[
+            FakeEntry(
+                "main",
+                options={
+                    "mode": "bridge",
+                    "filter": {"include_entities": ["light.one"]},
+                },
+            ),
+            apple_side,
+        ],
+    )
+    prune_manager = manager_module.PlatformSyncManager(
+        prune_hass, prune_config, prune_profile
+    )
+    candidates = prune_manager._homekit_prune_candidates(
+        frozenset({"light.one"})
+    )
+    check(
+        len(candidates) == 1
+        and candidates[0].entry_id == "apple-tv-side"
+        and candidates[0].entity_id == "media_player.apple_tv",
+        "An explicitly lifecycle-owned Apple TV side Bridge is removable when exclusion removes it from the exact HomeKit plan",
+    )
+    return 7
+
+
+async def check_homekit_apple_tv_target_transaction_race_rolls_back() -> int:
+    """A provenance change rolls back around a non-running prune candidate."""
+    main = FakeEntry(
+        "main",
+        options={
+            "mode": "bridge",
+            "filter": {"include_entities": ["light.old"]},
+        },
+    )
+    old = FakeEntry(
+        "old-side",
+        source="accessory",
+        options={
+            "mode": "accessory",
+            "filter": {"include_entities": ["camera.old"]},
+        },
+    )
+    hass, profile, config = lifecycle_manager_fixture(
+        managed=(main.entry_id, old.entry_id),
+        lifecycle=(old.entry_id,),
+        homekit_entries=[main, old],
+    )
+    candidate = SimpleNamespace(
+        entry_id=old.entry_id,
+        entity_id="camera.old",
+        imported=False,
+        name="Old Camera",
+        port=21064,
+        mode="accessory",
+        yaml_relative_path=None,
+    )
+    current = frozenset({"light.old", "camera.old"})
+    provenance = [
+        frozenset({"media_player.apple_tv"}),
+        frozenset({"media_player.apple_tv"}),
+        frozenset({"media_player.replacement"}),
+    ]
+    calls: list[str] = []
+    validation_allowances: list[frozenset[str]] = []
+    restore_allowances: list[frozenset[str]] = []
+
+    async def read_source(_hass: Any, _config: Any) -> Any:
+        return models.SourceSnapshot(
+            entities=frozenset({"light.one"}),
+            source_revision="apple-tv-target-race",
+        )
+
+    async def find_apple_tv(_hass: Any) -> frozenset[str]:
+        return provenance.pop(0)
+
+    async def read_target(
+        _hass: Any, _config: Any, _platform: Any
+    ) -> frozenset[str]:
+        return current
+
+    async def validate_target(
+        _hass: Any,
+        _config: Any,
+        _platform: Any,
+        _expected: Any,
+        *,
+        allowed_nonrunning_homekit_entry_ids: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        validation_allowances.append(allowed_nonrunning_homekit_entry_ids)
+        return {
+            "loaded": True,
+            "runtime_verified": False,
+            "runtime_pending_prune_entries": 1,
+        }
+
+    async def prepare_target(_hass: Any, _config: Any, platform: Any) -> Any:
+        return targets.TargetBackup(platform=platform, payload=current)
+
+    async def apply_target(
+        _hass: Any, _config: Any, plan: Any, _rooms: Any, **_kwargs: Any
+    ) -> bool:
+        nonlocal current
+        calls.append("apply")
+        current = plan.desired
+        return False
+
+    async def restore_target(
+        _hass: Any,
+        _config: Any,
+        backup: Any,
+        *,
+        allowed_nonrunning_homekit_entry_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        nonlocal current
+        calls.append("rollback")
+        restore_allowances.append(allowed_nonrunning_homekit_entry_ids)
+        current = backup.payload
+
+    async def unexpected_lifecycle(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append("lifecycle")
+        raise AssertionError("The provenance race must roll back before lifecycle work")
+
+    originals = (
+        manager_module.async_read_source,
+        manager_module.async_find_apple_tv_entities,
+        manager_module.async_read_target,
+        manager_module.async_validate_target,
+        manager_module.async_prepare_target,
+        manager_module.async_apply_plan,
+        manager_module.async_restore_target,
+        manager_module.homekit_new_accessory_mode_entities,
+        manager_module.async_remove_homekit_accessory_candidates,
+        manager_module.async_create_homekit_accessory,
+    )
+    manager_module.async_read_source = read_source
+    manager_module.async_find_apple_tv_entities = find_apple_tv
+    manager_module.async_read_target = read_target
+    manager_module.async_validate_target = validate_target
+    manager_module.async_prepare_target = prepare_target
+    manager_module.async_apply_plan = apply_target
+    manager_module.async_restore_target = restore_target
+    manager_module.homekit_new_accessory_mode_entities = (
+        lambda *_args, **_kwargs: frozenset()
+    )
+    manager_module.async_remove_homekit_accessory_candidates = unexpected_lifecycle
+    manager_module.async_create_homekit_accessory = unexpected_lifecycle
+    manager = manager_module.PlatformSyncManager(hass, config, profile)
+    manager._homekit_prune_candidates = lambda _desired: (candidate,)
+    manager._publish_homekit_restart_requirement = lambda _required: None
+    manager._publish_pairing_requirements = lambda _requirements: None
+    logger_disabled = manager_module._LOGGER.disabled
+    manager_module._LOGGER.disabled = True
+    try:
+        try:
+            await manager.async_reconcile(
+                reason="apple_tv_target_transaction_race", apply=True
+            )
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("A target-transaction provenance race must fail")
+    finally:
+        manager_module._LOGGER.disabled = logger_disabled
+        (
+            manager_module.async_read_source,
+            manager_module.async_find_apple_tv_entities,
+            manager_module.async_read_target,
+            manager_module.async_validate_target,
+            manager_module.async_prepare_target,
+            manager_module.async_apply_plan,
+            manager_module.async_restore_target,
+            manager_module.homekit_new_accessory_mode_entities,
+            manager_module.async_remove_homekit_accessory_candidates,
+            manager_module.async_create_homekit_accessory,
+        ) = originals
+    check(
+        "changed during target transaction" in message,
+        "Apple TV provenance is rechecked before the reversible commit boundary",
+    )
+    check(
+        calls == ["apply", "rollback"]
+        and current == frozenset({"light.old", "camera.old"}),
+        "a target-transaction provenance race restores the exact prior exposure",
+    )
+    check(
+        manager.state.rollback_status == "complete",
+        "the provenance-race rollback is recorded as complete",
+    )
+    check(
+        validation_allowances
+        == [frozenset({old.entry_id}), frozenset({old.entry_id})]
+        and restore_allowances == [frozenset({old.entry_id})],
+        "Initial, post-write, and rollback validation preserve the exact pending-prune runtime allowance",
+    )
+    return 4
 
 
 async def check_selected_target_exact_reconciliation() -> int:
@@ -4542,6 +8129,10 @@ async def check_noop_single_read_validation() -> int:
     platforms = list(const.TargetPlatform)
     reads = {platform: 0 for platform in platforms}
     validations = {platform: 0 for platform in platforms}
+    google_native_validations = 0
+    google_request_syncs = 0
+    google_native_failure = False
+    google_request_failure = False
     current = {
         platform: frozenset({"light.already_exact"}) for platform in platforms
     }
@@ -4575,6 +8166,29 @@ async def check_noop_single_read_validation() -> int:
     ) -> tuple[str, ...]:
         return ()
 
+    async def validate_google_native(
+        _hass: Any, expected: frozenset[str]
+    ) -> dict[str, Any]:
+        nonlocal google_native_validations
+        google_native_validations += 1
+        check(
+            expected == current[const.TargetPlatform.GOOGLE],
+            "Google no-op validation serializes the exact desired set",
+        )
+        if google_native_failure:
+            raise RuntimeError("simulated Google native payload mismatch")
+        return {"native_sync_payload_match": True}
+
+    async def request_google_sync(_hass: Any) -> dict[str, Any]:
+        nonlocal google_request_syncs
+        google_request_syncs += 1
+        if google_request_failure:
+            raise RuntimeError("simulated Google Request Sync failure")
+        return {
+            "request_sync_accepted": True,
+            "request_sync_http_status": 200,
+        }
+
     async def unexpected_prepare(_hass: Any, _config: Any, _platform: Any) -> Any:
         nonlocal prepare_calls
         prepare_calls += 1
@@ -4593,6 +8207,8 @@ async def check_noop_single_read_validation() -> int:
         manager_module.async_read_target,
         manager_module.async_validate_target,
         manager_module.async_google_room_updates,
+        manager_module._google_native_sync_payload_snapshot,
+        manager_module._request_google_sync,
         manager_module.async_prepare_target,
         manager_module.async_apply_plan,
     )
@@ -4601,13 +8217,103 @@ async def check_noop_single_read_validation() -> int:
     manager_module.async_read_target = read_target
     manager_module.async_validate_target = validate_target
     manager_module.async_google_room_updates = no_room_updates
+    manager_module._google_native_sync_payload_snapshot = validate_google_native
+    manager_module._request_google_sync = request_google_sync
     manager_module.async_prepare_target = unexpected_prepare
     manager_module.async_apply_plan = unexpected_apply
     try:
         manager = manager_module.PlatformSyncManager(
             SimpleNamespace(bus=TransactionBus()), transaction_config()
         )
-        result = await manager.async_reconcile(reason="noop", apply=True)
+        preview_result = await manager.async_reconcile(reason="preview", apply=False)
+        check(
+            preview_result["status"] == "preview"
+            and manager.state.source_fingerprint is None
+            and google_native_validations == 0,
+            "A preview neither advances the applied source baseline nor runs the full Google serializer",
+        )
+        result = await manager.async_reconcile(
+            reason="service_sync_now", apply=True
+        )
+        check(
+            google_native_validations == 2
+            and google_request_syncs == 1
+            and result["plans"]["google"]["runtime"][
+                "native_sync_payload_match"
+            ]
+            is True
+            and result["plans"]["google"]["runtime"][
+                "request_sync_accepted"
+            ]
+            is True,
+            "A manual no-op validates, requests, and revalidates Google SYNC",
+        )
+        manager.state.source_fingerprint = None
+        retry_result = await manager.async_reconcile(
+            reason="retry_after_error", apply=True
+        )
+        check(
+            google_native_validations == 3
+            and google_request_syncs == 1
+            and retry_result["plans"]["google"]["runtime"][
+                "request_sync_reused_for_source"
+            ]
+            is True,
+            "A later-target retry revalidates but does not resend Google Request Sync for the same source fingerprint",
+        )
+        await manager.async_reconcile(reason="target_health_audit", apply=True)
+        check(
+            google_native_validations == 3 and google_request_syncs == 1,
+            "A stable 300-second health audit keeps Google validation lightweight",
+        )
+
+        request_failure_manager = manager_module.PlatformSyncManager(
+            SimpleNamespace(bus=TransactionBus()), transaction_config()
+        )
+        google_request_failure = True
+        try:
+            await request_failure_manager.async_reconcile(
+                reason="service_sync_now", apply=True
+            )
+        except RuntimeError as error:
+            check(
+                "Request Sync failure" in str(error)
+                and request_failure_manager._google_noop_request_sync_fingerprint
+                is None,
+                "A failed Google Request Sync is not cached as delivered",
+            )
+        else:
+            raise AssertionError("A failed Google Request Sync must fail closed")
+        google_request_failure = False
+        request_retry = await request_failure_manager.async_reconcile(
+            reason="retry_after_error", apply=True
+        )
+        check(
+            google_request_syncs == 3
+            and request_retry["plans"]["google"]["runtime"][
+                "request_sync_reused_for_source"
+            ]
+            is False,
+            "A failed Google Request Sync is sent again on the bounded retry",
+        )
+
+        failing_manager = manager_module.PlatformSyncManager(
+            SimpleNamespace(bus=TransactionBus()), transaction_config()
+        )
+        google_native_failure = True
+        try:
+            await failing_manager.async_reconcile(
+                reason="startup_scan", apply=True
+            )
+        except RuntimeError as error:
+            check(
+                "payload mismatch" in str(error),
+                "A startup no-op fails closed on a native Google payload mismatch",
+            )
+        else:
+            raise AssertionError(
+                "A Google native payload mismatch must not report a no-op as synced"
+            )
     finally:
         (
             manager_module.async_read_source,
@@ -4615,6 +8321,8 @@ async def check_noop_single_read_validation() -> int:
             manager_module.async_read_target,
             manager_module.async_validate_target,
             manager_module.async_google_room_updates,
+            manager_module._google_native_sync_payload_snapshot,
+            manager_module._request_google_sync,
             manager_module.async_prepare_target,
             manager_module.async_apply_plan,
         ) = original_functions
@@ -4624,18 +8332,18 @@ async def check_noop_single_read_validation() -> int:
         "An exact target set completes as a no-op sync",
     )
     check(
-        reads == {platform: 1 for platform in platforms},
-        "A no-op reads every target exactly once without post-apply readback",
+        reads == {platform: 7 for platform in platforms},
+        "Each no-op reads every target once without post-apply readback",
     )
     check(
-        validations == {platform: 1 for platform in platforms},
-        "A no-op validates every target exactly once",
+        validations == {platform: 7 for platform in platforms},
+        "Each no-op validates every target exactly once",
     )
     check(
         prepare_calls == 0 and apply_calls == 0,
         "A no-op performs no prepare or apply operation",
     )
-    return 7
+    return 13
 
 
 async def check_cancelled_transaction_rollback() -> int:
@@ -4988,6 +8696,7 @@ async def check_diagnostics_privacy() -> int:
             }
         },
         error="Connection failed for 192.0.2.10",
+        error_stage="google_validate",
         rollback_status="not_needed",
         rollback_incomplete_targets=[],
     )
@@ -5023,7 +8732,9 @@ async def check_diagnostics_privacy() -> int:
         and result["state"]["plans"]["google"]["added"] == 1
         and result["state"]["plans"]["google"]["missing"] == 1
         and result["state"]["has_source_fingerprint"] is True
-        and result["state"]["has_error"] is True,
+        and result["state"]["has_error"] is True
+        and result["state"]["error_code"] == "sync_error"
+        and result["state"]["error_stage"] == "google_validate",
         "Diagnostics retain useful counts and health state after redaction",
     )
     return 2
@@ -5037,21 +8748,30 @@ async def main() -> None:
     assertions += check_matter_exact_configuration()
     assertions += await check_matter_validation_contract()
     assertions += check_matter_recovery_guard()
+    assertions += await check_matter_process_generation_barrier()
+    assertions += await check_matter_manual_pairing_snapshot()
+    assertions += await check_matter_removal_restart_and_rollback()
     assertions += await check_matter_apply_process_fallback()
     assertions += await check_matter_restart_cancellation_marker()
     assertions += await check_guarded_matter_runtime_recovery()
     assertions += await check_matter_source_runtime_validation()
+    assertions += await check_dashboard_fresh_storage_and_camera_fields()
     assertions += await check_matter_request_overall_timeout()
     assertions += check_matter_endpoint_compatibility()
     assertions += await check_matter_save_barrier_and_uncertain_restart()
     assertions += await check_matter_backup_completion_handshake()
     assertions += await check_matter_restart_is_fire_and_forget()
     assertions += check_google_room_schema()
+    assertions += await check_google_native_acceptance()
+    assertions += await check_google_mutation_payload_guards()
+    assertions += await check_google_executor_mutation_cancellation()
     assertions += await check_single_switch_runtime()
     assertions += await check_safe_migration()
     assertions += check_legacy_registry_cleanup()
     assertions += check_internal_timing_config()
     assertions += await check_source_watcher_policy()
+    assertions += check_quick_reload_trigger()
+    assertions += await check_dashboard_source_audit()
     assertions += await check_homekit_event_trigger_and_queue()
     assertions += await check_startup_race_and_safe_stop()
     assertions += await check_startup_listener_lifecycle()
@@ -5060,9 +8780,19 @@ async def main() -> None:
     assertions += check_source_events_preserve_fault_backoff()
     assertions += await check_matter_startup_recovery_grace()
     assertions += await check_matter_recovery_episode_and_cooldown()
+    assertions += check_matter_transaction_restart_is_not_recovery_throttled()
     assertions += await check_matter_apply_restart_guard_across_reload()
     assertions += await check_config_entry_background_task_ownership()
     assertions += await check_permanent_error_retry_stop()
+    assertions += check_homekit_selected_pairing_requirements()
+    assertions += await check_homekit_prune_confirmation_identity()
+    assertions += await check_homekit_lifecycle_progress_persistence()
+    assertions += await check_homekit_restart_required_postcommit()
+    assertions += await check_homekit_pending_prune_defers_accessory_creation()
+    assertions += await check_homekit_restart_marker_startup_scope()
+    assertions += await check_homekit_create_cancellation_persistence()
+    assertions += await check_homekit_apple_tv_provenance_races()
+    assertions += await check_homekit_apple_tv_target_transaction_race_rolls_back()
     assertions += await check_selected_target_exact_reconciliation()
     assertions += await check_manager_transaction()
     assertions += await check_noop_single_read_validation()

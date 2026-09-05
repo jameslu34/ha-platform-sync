@@ -72,6 +72,10 @@ class FakeDashboard:
 async def main() -> None:
     Target = const.TargetPlatform
     Rule = models.PlatformRule
+    check(
+        const.CONF_HOMEKIT_MAIN_ENTRY_ID == "homekit_main_entry_id",
+        "durable HomeKit main Bridge identity has a stable configuration key",
+    )
 
     dashboard = {
         "views": [
@@ -384,7 +388,7 @@ async def main() -> None:
     preview_writes = 0
     check(preview_reads == 1 and preview_writes == 0, "explicit preview remains read-only")
 
-    print("PASS: 27 simulated acceptance assertions")
+    print("PASS: 28 simulated acceptance assertions")
 
 
 if __name__ == "__main__":

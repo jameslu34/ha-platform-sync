@@ -14,14 +14,18 @@ def normalize_entities(values: object) -> frozenset[str]:
     """Return valid, normalized entity identifiers."""
     if not isinstance(values, (list, tuple, set, frozenset)):
         return frozenset()
-    return frozenset(
-        value.strip()
-        for value in values
-        if isinstance(value, str)
-        and value.strip()
-        and "." in value
-        and " " not in value
-    )
+    normalized: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        entity_id = value.strip()
+        if (
+            entity_id
+            and "." in entity_id
+            and not any(character.isspace() for character in entity_id)
+        ):
+            normalized.add(entity_id)
+    return frozenset(normalized)
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,6 +13,8 @@ Describe the user problem and the change.
 
 - [ ] `python tests/simulate_acceptance.py`
 - [ ] `python tests/simulate_adapter_acceptance.py`
+- [ ] `python tests/test_homekit_lifecycle.py`
+- [ ] `python tests/test_homekit_pairing.py`
 - [ ] `python tests/simulate_config_flow_acceptance.py`
 - [ ] `python tests/validate_translations.py`
 - [ ] `python -m compileall custom_components/platform_sync tests`

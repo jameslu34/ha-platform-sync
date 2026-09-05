@@ -1,6 +1,6 @@
 # 裝置平台同步：完整使用手冊
 
-> 適用版本：0.6.5
+> 適用版本：0.7.0
 > 中文名稱：裝置平台同步
 > English name: Cross-Platform Device Sync
 
@@ -300,11 +300,22 @@ Bridge／Accessory。
 
 同步成功後，外掛會通知 Google Home 重新取得裝置清單。
 
+若目前安裝的 Home Assistant Google 原生分類器明確判定某個 `sensor` 或
+`binary_sensor` 沒有可用特徵，外掛會把它另計為「平台原生不支援」，不會偽裝成
+開關。這類裝置無法靠人工配對補足。攝影機、門鎖、保全及其他可控裝置若有原生
+特徵，仍會嚴格驗證裝置類型與 payload；若 Home Assistant 原生分類器判定不支援，
+則只從 Google 的有效曝光中略過該實體，並在通知列出確切裝置與修正方式，不會拖垮
+HomeKit 或 Matter 的同步。例如沒有原生 `STREAM` 能力的 camera 無法在 Google
+Home 變成可觀看攝影機，也不會被偽裝成開關。
+
 ### HomeKit
 
 勾選 HomeKit 後，需要選擇：
 
 - **受管理的 HomeKit 目標項目**
+- **HomeKit 主 Bridge**
+- 選填的「允許外掛建立或移除的 HomeKit accessory」
+- 有匯入式 accessory 時使用的專用 YAML 檔相對路徑
 - 選填的「HomeKit 額外加入」
 - 選填的「HomeKit 排除」
 
@@ -327,14 +338,18 @@ Home Assistant 重啟後又被 YAML 覆寫回去。
 - 選填的「Matterbridge 排除」
 
 有變更時，外掛會更新裝置清單並重新載入 `matterbridge-hass`。
+Matter 本身沒有原生攝影機或保全系統裝置類型；這類選取仍會保留給 Matterbridge
+探索同一台 Home Assistant 裝置上的其他相容端點，但通知會清楚標示限制，外掛不會
+宣稱 Matter 控制器能顯示攝影機畫面或原生保全系統。
 
 ## 額外加入與排除怎麼用
 
 每個目標平台都有自己的例外設定。
 
 除「額外加入」及受保護規則保留的項目外，已勾選目標中所有不在來源的既有曝光都會
-移除；「排除」中的項目即使存在於來源也不會加入。這裡的移除只取消此外掛管理的
-平台曝光，不會刪除 Home Assistant 實體，也不會解除原生平台配對。
+移除；「排除」中的項目即使存在於來源也不會加入。這裡的移除不會刪除 Home
+Assistant 實體。若是你明確授權生命週期管理的 HomeKit 單裝置 accessory，外掛會
+移除其 HA Config Entry；Apple 家庭中的失效圖塊仍可能需要家庭管理者手動移除。
 
 ### 額外加入
 
@@ -402,10 +417,17 @@ Home Assistant 重啟後又被 YAML 覆寫回去。
 
 只要「啟用同步」有勾選，Home Assistant 或此外掛啟動後一定會完整檢查一次。
 
+重新載入 Platform Sync Config Entry，以及 Home Assistant 的全域**快速重新載入**
+（`homeassistant.reload_all`）後，也一定會執行完整檢查。若快速重新載入後，HomeKit
+的曝光清單仍精確一致、Config Entry 也都是 loaded，但某個 runtime 沒有恢復，
+外掛只會重新載入該停止的 Entry，再次驗證完整清單；不會在這個復原流程中修改
+篩選條件或配對資料。
+
 ### 儀表板來源有變更時
 
 儀表板或相關實體資料有變化時，通常會很快開始檢查。短時間內的多次變更會合併，
-避免重複同步。
+避免重複同步。另有大約每 15 秒執行一次的本機儀表板指紋檢查作為補償；儀表板
+沒有變更時，不會連線或重寫任何目標平台。
 
 ### HomeKit 來源有變更時
 
@@ -415,9 +437,28 @@ Home Assistant 重啟後又被 YAML 覆寫回去。
 已明確選取的可更新 HomeKit 目標若發生設定變更，也會立即觸發重新檢查。平台仍在
 啟動時不會阻止保存完整設定，之後會由有上限的背景重試等待收斂。
 
+攝影機、門鎖、支援的電視／接收器／投影機，以及有 activity 的 remote 若需要
+HomeKit accessory 模式，會在其他平台的可回復交易完成後自動建立獨立 accessory。
+完成設定的確認頁會先列出預計需要 Apple 家庭配對的裝置；實際建立後，Home
+Assistant 會保留一則不含 PIN／Token 的通知，逐項列出仍需人工配對的裝置。
+尚未配對的主 Bridge 只會列成一次 Bridge 配對；Bridge 內的一般裝置不需逐台配對，
+只有每個獨立 side accessory 需要分別加入 Apple 家庭。
+若 Matterbridge 啟用 `enableServerRvc`，獨立的掃地機器人 server node 也會列在
+確認頁與通知中。請到 Matterbridge 的 **Devices** 頁確認；只有在尚未配對時才掃描
+該裝置的 QR code。外掛不會讀取 QR／PIN，也無法可靠讀回控制器 fabric 狀態。
+
+來源移除獨立 accessory 時，必須連續兩次讀到相同來源與候選清單，且間隔至少 15
+秒才會執行。只有「允許外掛建立或移除」中明確納管的項目可刪；主 Bridge、HomeKit
+來源、無關 accessory 與受保護的 Apple TV 項目不會自動刪除。匯入式 accessory
+還需要設定專用 YAML include 檔，並通過精確比對、備份與讀回。
+`configuration.yaml` 本身不能當作這個專用檔；路徑錯誤、找不到唯一的
+name／port／entity 區塊或身份中途變更，都會在刪除 Config Entry 前停止。若 Home
+Assistant 回報必須重新啟動，外掛會持久顯示此狀態，且在 Core 真正重新啟動前不會
+宣稱同步完成。
+
 ### Google Home 或 Matterbridge 作為來源時
 
-大約每 15 秒檢查一次裝置清單。偵測到變更後才會開始同步。
+大約每 60 秒檢查一次裝置清單。偵測到變更後才會開始同步。
 
 ### Matterbridge 自動復原
 
@@ -437,12 +478,16 @@ Matterbridge 備份真正完成，再優先重新啟動 Home Assistant 外掛；
 
 ### 沒有變更時
 
-外掛只會記錄「沒有變更」，不會：
+穩定的定期稽核只會記錄「沒有變更」，不會：
 
 - 重複通知 Google Home
 - 重載 HomeKit
 - 重新載入 Matterbridge
 - 控制任何裝置
+
+但手動同步、系統啟動、重新載入或剛偵測到新的來源版本時，即使本機 YAML 清單
+沒有變更，仍會驗證 Google 原生 payload、送出一次 Request Sync，再驗證一次。
+因為本機清單不變，不能證明 Google Home 已經重新整理。
 
 ## 如何修改設定
 
@@ -550,12 +595,18 @@ Home Assistant 標籤。
 
 ### HomeKit 目標沒有可選項目
 
-請先在 Home Assistant 建立並配對 HomeKit Bridge／Accessory，再回到此外掛
-設定中選取。外掛不會代替使用者建立或完成 Apple 家庭配對。
+請先在 Home Assistant 建立主 HomeKit Bridge，再回到此外掛設定中選取。需要
+accessory 模式的新裝置可由外掛建立原生獨立 Config Entry，但 Apple 家庭的最後
+配對仍必須由家庭管理者完成；裝置名稱會出現在確認頁與持續通知中。
 
-若主 Bridge 由 YAML 管理，請改用 Home Assistant UI 重新建立。匯入的單實體側項目
-可以固定留在已選配置中，不受儲存的 HomeKit 模式影響；若要更換或移除，必須自行
-修改 HomeKit YAML；外掛不會套用重啟後就會消失的匯入項目暫時變更。
+若確認頁列出 Matter 掃地機器人，請在 Matterbridge **Devices** 頁確認該獨立
+server node；已配對就不需動作，未配對才掃 QR。一般 Bridge 內的 Matter 裝置不需
+逐台再配對。
+
+若主 Bridge 由 YAML 管理，請改用 Home Assistant UI 重新建立。要讓外掛自動移除
+既有匯入式單實體 accessory，必須同時將它列入明確生命週期授權，並填入專用
+HomeKit YAML include 檔的安全相對路徑；外掛只會在 name、port 與單一 entity
+完全吻合且備份／讀回成功時修改。其他 YAML 項目維持唯讀。
 
 ### Google Home 顯示尚未設定完成
 
@@ -566,6 +617,10 @@ Home Assistant 標籤。
 - 已設定 `expose_by_default: false`。
 - 已使用獨立的 Google Assistant 裝置設定檔。
 - 設定檔路徑是相對路徑，不是完整磁碟路徑。
+
+Google Home 完成一次帳戶連結後，一般不需逐裝置配對。設定完成頁所列的人工工作
+只會包含 HomeKit Bridge／獨立 accessory，以及需要確認的 Matter 獨立 server node；
+Google 原生不支援的感測類別是能力限制，不會混入配對清單。
 
 ### Matterbridge 無法連線
 
@@ -643,9 +698,12 @@ Apple 家庭或 Matter 控制器 App 仍可能需要一些時間更新。
 5. 目標勾選 Google Home、HomeKit、Matterbridge。
 6. 填入 Google Assistant 裝置設定檔。
 7. 勾選受管理的 HomeKit 目標項目。
-8. 填入 Matterbridge 端點、連接埠與選填密碼。
-9. 視需要設定各平台的額外加入與排除。
-10. 在確認頁檢查後送出。
+8. 明確選擇其中的 HomeKit 主 Bridge。
+9. 只把確定交由外掛建立／移除的單裝置 accessory 勾入生命週期授權；有匯入式
+   accessory 時再填專用 YAML 檔相對路徑。
+10. 填入 Matterbridge 端點、連接埠與選填密碼。
+11. 視需要設定各平台的額外加入與排除。
+12. 在確認頁核對「需額外人工配對或確認」清單後送出。
 
 之後：
 

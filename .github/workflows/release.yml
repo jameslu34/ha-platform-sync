@@ -9,7 +9,7 @@ on:
       tag:
         description: Release tag (must match the integration version)
         required: true
-        default: "v0.6.5"
+        default: "v0.7.0"
         type: string
 
 permissions:
@@ -43,6 +43,10 @@ jobs:
         run: python tests/simulate_acceptance.py
       - name: Run adapter and safety acceptance simulation
         run: python tests/simulate_adapter_acceptance.py
+      - name: Run HomeKit lifecycle tests
+        run: |
+          python tests/test_homekit_lifecycle.py
+          python tests/test_homekit_pairing.py
       - name: Run configuration-flow acceptance simulation
         run: python tests/simulate_config_flow_acceptance.py
       - name: Validate translations

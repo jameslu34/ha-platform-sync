@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import inspect
 import json
 from pathlib import Path
 import re
 import secrets
 from typing import Any
+from http import HTTPStatus
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from homeassistant.core import HomeAssistant
@@ -29,6 +31,14 @@ MATTER_BACKUP_TIMEOUT = 120.0
 MATTER_RUNTIME_TIMEOUT = 180.0
 GOOGLE_SYNC_TIMEOUT = 30.0
 HOMEKIT_RELOAD_TIMEOUT = 60.0
+GOOGLE_SECURITY_DOMAINS = frozenset({"alarm_control_panel", "camera", "lock"})
+GOOGLE_NATIVE_OMISSION_DOMAINS = frozenset({"binary_sensor", "sensor"})
+MATTER_NO_NATIVE_DEVICE_DOMAINS = frozenset({"alarm_control_panel", "camera"})
+GOOGLE_SECURITY_REQUIRED_TRAITS = {
+    "alarm_control_panel": "action.devices.traits.ArmDisarm",
+    "camera": "action.devices.traits.CameraStream",
+    "lock": "action.devices.traits.LockUnlock",
+}
 HOMEKIT_FILTER_KEYS = (
     "include_entities",
     "include_domains",
@@ -122,6 +132,22 @@ class MatterRuntimeSnapshot:
     allowlist: frozenset[str]
 
 
+@dataclass(frozen=True, slots=True)
+class MatterProcessGeneration:
+    """Strict Matterbridge process identity used as a restart barrier."""
+
+    startup_at: int
+    running_times: int
+
+
+@dataclass(frozen=True, slots=True)
+class MatterManualPairingSnapshot:
+    """Secret-free server-node pairing guidance from plugin configuration."""
+
+    entities: frozenset[str]
+    controller_pairing_verified: bool = field(default=False, init=False)
+
+
 class MatterbridgeRuntimeError(RuntimeError):
     """A classified Matterbridge runtime failure without remote error material."""
 
@@ -142,6 +168,10 @@ class MatterbridgeCommandTimeoutError(RuntimeError):
     """A command was sent but its final remote result is uncertain."""
 
 
+class MatterbridgePluginRestartUncertainError(RuntimeError):
+    """The plugin restart command was sent but its completion is uncertain."""
+
+
 class MatterbridgeProcessRestartError(RuntimeError):
     """A full Matterbridge restart was attempted but did not converge."""
 
@@ -160,6 +190,10 @@ class HomeKitSourceFilterUnsupportedError(RuntimeError):
 
 class EmptyHomeKitSourceError(RuntimeError):
     """Raised when a selected HomeKit source entry exposes no entities."""
+
+
+class HomeKitRuntimeUnavailableError(RuntimeError):
+    """Raised when an exact loaded HomeKit target runtime is not running."""
 
 
 def _state_value(entry: Any) -> str:
@@ -349,7 +383,20 @@ def _managed_homekit_entries(hass: HomeAssistant, config: SyncConfig) -> list[An
     missing = sorted(set(requested) - set(available))
     if missing:
         raise RuntimeError(f"Managed HomeKit config entries are missing: {len(missing)}")
+    explicit_main = _configured_homekit_main_entry_id(config)
+    if explicit_main and explicit_main not in requested:
+        raise RuntimeError(
+            "The explicit HomeKit main Bridge is not a managed target entry"
+        )
     return [available[entry_id] for entry_id in requested]
+
+
+def _configured_homekit_main_entry_id(config: SyncConfig) -> str:
+    """Return one strict durable main ID, or empty for legacy inference."""
+    value = getattr(config, "homekit_main_entry_id", "")
+    if not isinstance(value, str) or value != value.strip():
+        raise RuntimeError("The HomeKit main Bridge entry ID is malformed")
+    return value
 
 
 def _homekit_source_entities(
@@ -416,22 +463,78 @@ async def async_read_homekit_source_entries(
     )
 
 
-def _homekit_layout(entries: list[Any]) -> tuple[Any, list[Any]]:
-    """Identify one main Bridge and preserve every explicitly managed side entry."""
-    mode_bridges = [entry for entry in entries if _homekit_mode(entry) != "accessory"]
-    if len(mode_bridges) == 1:
-        main = mode_bridges[0]
+def _homekit_layout(
+    entries: list[Any], main_entry_id: str = ""
+) -> tuple[Any, list[Any]]:
+    """Identify the durable main Bridge and preserve every managed side entry."""
+    by_id: dict[str, Any] = {}
+    for entry in entries:
+        entry_id = getattr(entry, "entry_id", None)
+        if not isinstance(entry_id, str) or not entry_id:
+            raise RuntimeError("A managed HomeKit entry has no valid entry ID")
+        if entry_id in by_id:
+            raise RuntimeError("Managed HomeKit entry IDs are not unique")
+        by_id[entry_id] = entry
+
+    if main_entry_id:
+        main = by_id.get(main_entry_id)
+        if main is None:
+            raise RuntimeError(
+                "The explicit HomeKit main Bridge is not present in the managed layout"
+            )
+        if _homekit_mode(main) == "accessory":
+            raise RuntimeError(
+                "The explicit HomeKit main Bridge is configured as an Accessory"
+            )
     else:
-        multi_entity = [
-            entry for entry in entries if len(_strict_homekit_target_entities(entry)) > 1
+        # Legacy entries may temporarily omit the durable ID. Retain the old
+        # unique inference only when mode and multi-entity evidence do not
+        # conflict; ambiguity must be surfaced instead of silently retargeting.
+        mode_bridges = [
+            entry for entry in entries if _homekit_mode(entry) != "accessory"
         ]
-        if len(multi_entity) != 1:
-            raise RuntimeError("Managed HomeKit entries do not identify exactly one main Bridge")
-        main = multi_entity[0]
+        if len(mode_bridges) == 1:
+            main = mode_bridges[0]
+        else:
+            multi_entity = [
+                entry
+                for entry in mode_bridges
+                if len(_strict_homekit_target_entities(entry)) > 1
+            ]
+            if len(multi_entity) != 1:
+                raise RuntimeError(
+                    "Managed HomeKit entries do not identify exactly one main Bridge"
+                )
+            main = multi_entity[0]
     dedicated = [entry for entry in entries if entry is not main]
     if any(len(_homekit_entities(entry)) > 1 for entry in dedicated):
         raise RuntimeError("A managed HomeKit side entry exposes more than one entity")
     return main, dedicated
+
+
+def _homekit_layout_for_config(
+    entries: list[Any], config: SyncConfig
+) -> tuple[Any, list[Any]]:
+    """Resolve one layout using the durable ID and reject source overlap."""
+    explicit_main = _configured_homekit_main_entry_id(config)
+    main, dedicated = _homekit_layout(entries, explicit_main)
+    source_ids = set(getattr(config, "homekit_source_entry_ids", ()))
+    if getattr(main, "entry_id", None) in source_ids:
+        raise RuntimeError("The HomeKit main Bridge cannot also be a source entry")
+    return main, dedicated
+
+
+def homekit_managed_main_entry_id(
+    hass: HomeAssistant, config: SyncConfig
+) -> str:
+    """Return the exactly identified writable main HomeKit Bridge entry ID."""
+    main, _dedicated = _homekit_layout_for_config(
+        _managed_homekit_entries(hass, config), config
+    )
+    entry_id = getattr(main, "entry_id", None)
+    if not isinstance(entry_id, str) or not entry_id:
+        raise RuntimeError("The managed HomeKit main Bridge has no entry ID")
+    return entry_id
 
 
 def validate_target_configuration(
@@ -444,7 +547,7 @@ def validate_target_configuration(
             if getattr(entry, "disabled_by", None) is not None:
                 raise RuntimeError("A managed HomeKit config entry is disabled")
             _strict_homekit_target_entities(entry)
-        main, dedicated = _homekit_layout(entries)
+        main, dedicated = _homekit_layout_for_config(entries, config)
         if _config_entry_source(main) == "import":
             raise RuntimeError(
                 "The writable HomeKit main Bridge cannot be YAML/import-managed"
@@ -478,6 +581,307 @@ def _google_context(hass: HomeAssistant) -> tuple[Any, Any, dict[str, Any]]:
     if not isinstance(entity_config, dict):
         raise RuntimeError("Google Assistant runtime entity_config is not mutable")
     return entry, runtime, entity_config
+
+
+def _google_native_config(hass: HomeAssistant) -> Any:
+    """Return HA's native Google config with explicit capability checks."""
+    _, runtime, _ = _google_context(hass)
+    if not callable(getattr(runtime, "async_get_agent_users", None)):
+        raise RuntimeError("Google Assistant native runtime configuration is unavailable")
+    return runtime
+
+
+async def _google_native_snapshot(
+    hass: HomeAssistant, expected: frozenset[str]
+) -> dict[str, Any]:
+    """Verify HA maps protected device categories to native Google types.
+
+    This intentionally avoids generating a complete SYNC response during
+    startup and periodic health scans because that enumerates every HA state
+    once per linked Google user. The complete native serializer is exercised
+    only around an actual request-sync mutation.
+    """
+    native = _google_native_config(hass)
+    get_users = getattr(native, "async_get_agent_users", None)
+    if not callable(get_users):
+        raise RuntimeError("Google Assistant linked-user state is unreadable")
+    agent_users_result = get_users()
+    if inspect.isawaitable(agent_users_result):
+        agent_users_result = await agent_users_result
+    agent_users = tuple(agent_users_result)
+    if not agent_users:
+        raise RuntimeError("Google Assistant has no linked Google Home user")
+
+    try:
+        from homeassistant.components.google_assistant.const import (
+            DOMAIN_TO_GOOGLE_TYPES,
+        )
+    except (ImportError, AttributeError) as error:
+        raise RuntimeError("Google Assistant native type mapping is unavailable") from error
+
+    native_supported, native_unsupported = _google_native_support_partition(
+        hass, native, expected
+    )
+    native_security = frozenset(
+        entity_id
+        for entity_id in expected
+        if entity_id.split(".", 1)[0] in GOOGLE_SECURITY_DOMAINS
+    )
+    security_types = {
+        entity_id: str(DOMAIN_TO_GOOGLE_TYPES.get(entity_id.split(".", 1)[0], ""))
+        for entity_id in sorted(native_security)
+    }
+    invalid_types = {
+        entity_id: device_type
+        for entity_id, device_type in security_types.items()
+        if not device_type
+    }
+    if invalid_types:
+        raise RuntimeError("Google native security-device type is missing")
+    return {
+        "linked_users": len(agent_users),
+        "native_domain_devices": sum(
+            entity_id.split(".", 1)[0] in DOMAIN_TO_GOOGLE_TYPES
+            for entity_id in expected
+        ),
+        "configured_but_not_native_domain": sum(
+            entity_id.split(".", 1)[0] not in DOMAIN_TO_GOOGLE_TYPES
+            for entity_id in expected
+        ),
+        "configured_sync_devices": len(expected),
+        "native_supported_devices": len(native_supported),
+        "native_unsupported_devices": len(native_unsupported),
+        "native_security_devices": len(native_security),
+        "native_security_types": security_types,
+    }
+
+
+def _google_native_support_sets(
+    hass: HomeAssistant, native: Any, expected: frozenset[str]
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Classify entities with HA's own native Google trait logic.
+
+    An entity is considered unsupported only when its State exists and the
+    installed Home Assistant Google integration independently reports that it
+    has no native traits.  This prevents an arbitrary omission from the SYNC
+    serializer from being mistaken for a platform compatibility limitation.
+    """
+    try:
+        from homeassistant.components.google_assistant.helpers import GoogleEntity
+    except (ImportError, AttributeError) as error:
+        raise RuntimeError(
+            "Google Assistant native support classifier is unavailable"
+        ) from error
+
+    supported: set[str] = set()
+    unsupported: set[str] = set()
+    missing_states: set[str] = set()
+    for entity_id in sorted(expected):
+        state = hass.states.get(entity_id)
+        if state is None:
+            missing_states.add(entity_id)
+            continue
+        try:
+            is_supported = bool(GoogleEntity(hass, native, state).is_supported())
+        except Exception as error:
+            raise RuntimeError(
+                "Google Assistant native support could not be classified"
+            ) from error
+        if is_supported:
+            supported.add(entity_id)
+        else:
+            unsupported.add(entity_id)
+
+    if missing_states:
+        raise RuntimeError(
+            "Google native configured-device state missing "
+            f"(count={len(missing_states)})"
+        )
+    return frozenset(supported), frozenset(unsupported)
+
+
+def google_native_unrepresentable_entities(
+    hass: HomeAssistant, expected: frozenset[str]
+) -> frozenset[str]:
+    """Return selected entities that Google cannot expose as native devices.
+
+    Sensors and binary sensors without a Google trait are accepted as explicit
+    configured omissions because Home Assistant itself omits them from SYNC.
+    A controllable or security entity is different: silently retaining it in
+    YAML would claim an exposure that Google can never create.  The manager
+    removes only those entities from the effective Google plan and reports an
+    owner-visible platform limitation instead of failing every target.
+    """
+    native = _google_native_config(hass)
+    _supported, unsupported = _google_native_support_sets(hass, native, expected)
+    return frozenset(
+        entity_id
+        for entity_id in unsupported
+        if entity_id.split(".", 1)[0] not in GOOGLE_NATIVE_OMISSION_DOMAINS
+    )
+
+
+def matter_native_unrepresentable_entities(
+    expected: frozenset[str],
+) -> frozenset[str]:
+    """Return selections for which Matter has no equivalent device type.
+
+    Matterbridge uses a Home Assistant allowlist at device/entity discovery
+    time, so the selection is retained: another supported endpoint belonging
+    to the same device may still be created.  These entities are nevertheless
+    reported as controller limitations and are never claimed as native Matter
+    cameras or alarm panels.
+    """
+    return frozenset(
+        entity_id
+        for entity_id in expected
+        if entity_id.split(".", 1)[0] in MATTER_NO_NATIVE_DEVICE_DOMAINS
+    )
+
+
+def _google_native_support_partition(
+    hass: HomeAssistant, native: Any, expected: frozenset[str]
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Require every non-observation entity to have native Google support."""
+    supported, unsupported = _google_native_support_sets(hass, native, expected)
+    unsupported_security = frozenset(
+        entity_id
+        for entity_id in unsupported
+        if entity_id.split(".", 1)[0] in GOOGLE_SECURITY_DOMAINS
+    )
+    if unsupported_security:
+        raise RuntimeError(
+            "Google native security-device support is missing "
+            f"(count={len(unsupported_security)})"
+        )
+    unsupported_non_observation = frozenset(
+        entity_id
+        for entity_id in unsupported
+        if entity_id.split(".", 1)[0] not in GOOGLE_NATIVE_OMISSION_DOMAINS
+    )
+    if unsupported_non_observation:
+        raise RuntimeError(
+            "Google native controllable-device support is missing "
+            f"(count={len(unsupported_non_observation)})"
+        )
+    return frozenset(supported), frozenset(unsupported)
+
+
+async def _google_native_sync_payload_snapshot(
+    hass: HomeAssistant, expected: frozenset[str]
+) -> dict[str, Any]:
+    """Require each linked user to get HA's exact native-supported SYNC set."""
+    native = _google_native_config(hass)
+    get_users = getattr(native, "async_get_agent_users", None)
+    if not callable(get_users):
+        raise RuntimeError("Google Assistant linked-user state is unreadable")
+    agent_users_result = get_users()
+    if inspect.isawaitable(agent_users_result):
+        agent_users_result = await agent_users_result
+    agent_users = tuple(agent_users_result)
+    if not agent_users:
+        raise RuntimeError("Google Assistant has no linked Google Home user")
+
+    try:
+        from homeassistant.components.google_assistant.smart_home import (
+            async_devices_sync_response,
+        )
+        from homeassistant.components.google_assistant.const import (
+            DOMAIN_TO_GOOGLE_TYPES,
+        )
+    except (ImportError, AttributeError) as error:
+        raise RuntimeError(
+            "Google Assistant native SYNC serializer is unavailable"
+        ) from error
+
+    native_supported, native_unsupported = _google_native_support_partition(
+        hass, native, expected
+    )
+    native_security = frozenset(
+        entity_id
+        for entity_id in native_supported
+        if entity_id.split(".", 1)[0] in GOOGLE_SECURITY_DOMAINS
+    )
+
+    try:
+        async with asyncio.timeout(GOOGLE_SYNC_TIMEOUT):
+            for agent_user_id in agent_users:
+                try:
+                    devices = await async_devices_sync_response(
+                        hass, native, agent_user_id
+                    )
+                except Exception as error:
+                    raise RuntimeError(
+                        "Google Assistant native SYNC payload could not be generated"
+                    ) from error
+                if not isinstance(devices, list):
+                    raise RuntimeError(
+                        "Google Assistant native SYNC payload is malformed"
+                    )
+
+                device_ids: list[str] = []
+                for device in devices:
+                    if not isinstance(device, Mapping):
+                        raise RuntimeError(
+                            "Google Assistant native SYNC device is malformed"
+                        )
+                    device_id = device.get("id")
+                    if not isinstance(device_id, str) or not device_id:
+                        raise RuntimeError(
+                            "Google Assistant native SYNC device id is malformed"
+                        )
+                    device_ids.append(device_id)
+
+                native_ids = frozenset(device_ids)
+                if len(native_ids) != len(device_ids):
+                    raise RuntimeError(
+                        "Google Assistant native SYNC payload contains duplicate "
+                        "device ids"
+                    )
+                missing = native_supported - native_ids
+                extra = native_ids - native_supported
+                if missing or extra:
+                    raise RuntimeError(
+                        "Google Assistant native SYNC payload exact-set mismatch "
+                        f"(missing={len(missing)}, extra={len(extra)})"
+                    )
+
+                devices_by_id = {
+                    str(device["id"]): device for device in devices
+                }
+                for entity_id in native_security:
+                    device = devices_by_id[entity_id]
+                    domain = entity_id.split(".", 1)[0]
+                    expected_type = DOMAIN_TO_GOOGLE_TYPES.get(domain)
+                    required_trait = GOOGLE_SECURITY_REQUIRED_TRAITS[domain]
+                    traits = device.get("traits")
+                    if (
+                        not isinstance(expected_type, str)
+                        or not expected_type
+                        or device.get("type") != expected_type
+                        or not isinstance(traits, list)
+                        or not traits
+                        or any(
+                            not isinstance(trait, str) or not trait
+                            for trait in traits
+                        )
+                        or required_trait not in traits
+                    ):
+                        raise RuntimeError(
+                            "Google Assistant native security-device payload is malformed"
+                        )
+    except TimeoutError as error:
+        raise RuntimeError("Google Assistant native SYNC payload timed out") from error
+
+    return {
+        "linked_users": len(agent_users),
+        "configured_sync_devices": len(expected),
+        "native_sync_devices": len(native_supported),
+        "native_unsupported_devices": len(native_unsupported),
+        "native_security_devices": len(native_security),
+        "native_supported_payload_exact": True,
+        "native_sync_payload_match": True,
+    }
 
 
 async def _load_google_yaml(
@@ -604,16 +1008,29 @@ async def _matter_fire_and_forget(
         "dst": "Matterbridge",
         "params": dict(payload or {}),
     }
+    sent = False
     try:
         async with asyncio.timeout(MATTER_REQUEST_TIMEOUT):
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(url, heartbeat=20) as ws:
+                    # Once a complete websocket connection exists, treat the
+                    # send as uncertain if the restarting server closes during
+                    # the write. Retrying could execute the restart twice.
+                    sent = True
                     await ws.send_json(request)
     except TimeoutError as error:
+        # A process restart normally closes the management socket. Once a send
+        # has been attempted on an established websocket, its outcome is
+        # uncertain and it must never be sent a second time. The caller proves
+        # execution using the process-generation and runtime readback barrier.
+        if sent:
+            return
         raise RuntimeError(
             f"Matterbridge {command} command could not be sent"
         ) from error
     except Exception:
+        if sent:
+            return
         raise RuntimeError(
             f"Matterbridge {command} command could not be sent"
         ) from None
@@ -787,6 +1204,40 @@ def _matter_information(settings: Mapping[str, Any]) -> Mapping[str, Any] | None
     return information if isinstance(information, Mapping) else None
 
 
+def _matter_process_generation(
+    settings: Mapping[str, Any],
+) -> MatterProcessGeneration:
+    """Read a strict process generation from Matterbridge settings."""
+    information = _matter_information(settings)
+    if information is None:
+        raise RuntimeError("Matterbridge process generation is unavailable")
+    startup_at = information.get("startupAt")
+    running_times = information.get("runningTimes")
+    if (
+        isinstance(startup_at, bool)
+        or not isinstance(startup_at, int)
+        or startup_at <= 0
+        or isinstance(running_times, bool)
+        or not isinstance(running_times, int)
+        or running_times <= 0
+    ):
+        raise RuntimeError("Matterbridge process generation is unavailable")
+    return MatterProcessGeneration(
+        startup_at=startup_at,
+        running_times=running_times,
+    )
+
+
+def _matter_process_generation_advanced(
+    current: MatterProcessGeneration, previous: MatterProcessGeneration
+) -> bool:
+    """Require both official generation signals to prove a new process."""
+    return (
+        current.startup_at != previous.startup_at
+        and current.running_times > previous.running_times
+    )
+
+
 def _matter_token_configured(plugin_config: Mapping[str, Any]) -> bool:
     token = plugin_config.get("token")
     return isinstance(token, str) and bool(token.strip())
@@ -865,8 +1316,33 @@ def _matter_recovery_eligible(
     }
 
 
-def _matter_runtime_payload(
+def _matter_process_restart_preflight(
     snapshot: MatterRuntimeSnapshot, expected: frozenset[str]
+) -> bool:
+    """Prove a full restart cannot broaden an exact Matterbridge exposure set."""
+    information = _matter_information(snapshot.settings)
+    if (
+        not expected
+        or information is None
+        or str(information.get("bridgeStatus", "")).casefold() != "started"
+        or snapshot.plugin.get("name") != MATTER_PLUGIN
+        or snapshot.plugin.get("enabled") is not True
+        or not _matter_token_configured(snapshot.plugin_config)
+    ):
+        return False
+    try:
+        configured = _strict_matter_allowlist(snapshot.plugin_config)
+        _require_empty_matter_filters(snapshot.plugin_config)
+    except RuntimeError:
+        return False
+    return configured == expected and snapshot.allowlist == expected
+
+
+def _matter_runtime_payload(
+    snapshot: MatterRuntimeSnapshot,
+    expected: frozenset[str],
+    *,
+    process_generation_verified: bool = False,
 ) -> dict[str, Any]:
     loaded_devices = _matter_loaded_device_count(
         snapshot.plugin, snapshot.devices, expected
@@ -885,6 +1361,10 @@ def _matter_runtime_payload(
         "restart_required": False,
         "registered_devices": loaded_devices,
         "loaded_devices": loaded_devices,
+        "process_generation_verified": process_generation_verified,
+        # Matterbridge cannot read back native Apple/Google controller fabrics.
+        # Never promote management-API convergence to controller verification.
+        "controller_verified": False,
         "filter_by_area": "",
         "filter_by_label": "",
         "virtual_control_label": "",
@@ -916,7 +1396,11 @@ async def _read_matter_runtime_snapshot(
 
 
 async def _wait_matter_runtime(
-    config: SyncConfig, expected: frozenset[str], timeout: float = MATTER_RUNTIME_TIMEOUT
+    config: SyncConfig,
+    expected: frozenset[str],
+    timeout: float = MATTER_RUNTIME_TIMEOUT,
+    *,
+    after_generation: MatterProcessGeneration | None = None,
 ) -> dict[str, Any]:
     last_error: Exception | None = None
     try:
@@ -924,9 +1408,27 @@ async def _wait_matter_runtime(
             while True:
                 try:
                     snapshot = await _read_matter_runtime_snapshot(config)
+                    generation_verified = False
+                    if after_generation is not None:
+                        current_generation = _matter_process_generation(
+                            snapshot.settings
+                        )
+                        if not _matter_process_generation_advanced(
+                            current_generation, after_generation
+                        ):
+                            last_error = RuntimeError(
+                                "Matterbridge process generation has not advanced"
+                            )
+                            await asyncio.sleep(2)
+                            continue
+                        generation_verified = True
                     reason = _matter_runtime_issue(snapshot, expected)
                     if reason is None:
-                        return _matter_runtime_payload(snapshot, expected)
+                        return _matter_runtime_payload(
+                            snapshot,
+                            expected,
+                            process_generation_verified=generation_verified,
+                        )
                     last_error = MatterbridgeRuntimeError(
                         reason,
                         expected,
@@ -968,6 +1470,7 @@ async def async_recover_matter_runtime(
             raise RuntimeError(
                 "Matterbridge plugin restart did not converge safely"
             ) from plugin_restart_error
+        generation = _matter_process_generation(snapshot.settings)
         if (
             before_matter_process_restart is None
             or not before_matter_process_restart()
@@ -977,7 +1480,11 @@ async def async_recover_matter_runtime(
             ) from plugin_restart_error
         try:
             await _matter_fire_and_forget(config, "restart", {})
-            return await _wait_matter_runtime(config, expected)
+            return await _wait_matter_runtime(
+                config,
+                expected,
+                after_generation=generation,
+            )
         except Exception as process_restart_error:
             raise MatterbridgeProcessRestartError(
                 "Matterbridge process restart did not restore the runtime"
@@ -997,6 +1504,7 @@ async def async_read_target(
         )
     if platform is TargetPlatform.HOMEKIT:
         entries = _managed_homekit_entries(hass, config)
+        _homekit_layout_for_config(entries, config)
         return frozenset().union(
             *(_strict_homekit_target_entities(entry) for entry in entries)
         )
@@ -1005,6 +1513,32 @@ async def async_read_target(
     plugin_config = _matter_plugin_config(plugin)
     _require_empty_matter_filters(plugin_config)
     return _strict_matter_allowlist(plugin_config)
+
+
+async def async_matter_manual_pairing_entities(
+    config: SyncConfig, desired: frozenset[str]
+) -> MatterManualPairingSnapshot:
+    """Return RVC server-node candidates without claiming fabric pairing.
+
+    matterbridge-hass exposes each vacuum as a separately commissionable server
+    node when ``enableServerRvc`` is enabled. The management API does not offer
+    a reliable per-node controller-fabric readback, so this result can only
+    direct the user to verify the Devices panel and scan that device's QR code
+    if it is not already paired. No pairing secrets are read or returned.
+    """
+    plugins = await _matter_request(config, "plugins")
+    plugin_config = _matter_plugin_config(_find_matter_plugin(plugins))
+    enabled = plugin_config.get("enableServerRvc")
+    if not isinstance(enabled, bool):
+        raise RuntimeError(
+            "Matterbridge enableServerRvc must be an explicit boolean"
+        )
+    entities = (
+        frozenset(entity_id for entity_id in desired if entity_id.startswith("vacuum."))
+        if enabled
+        else frozenset()
+    )
+    return MatterManualPairingSnapshot(entities=entities)
 
 
 async def async_read_platform_source(
@@ -1024,8 +1558,41 @@ async def async_validate_target(
     config: SyncConfig,
     platform: TargetPlatform,
     expected: frozenset[str],
+    *,
+    allowed_nonrunning_homekit_entry_ids: frozenset[str] = frozenset(),
+    allowed_google_unrepresentable_entities: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Fail closed unless exact configuration and runtime state are readable."""
+    if (
+        not isinstance(allowed_nonrunning_homekit_entry_ids, frozenset)
+        or any(
+            not isinstance(entry_id, str)
+            or not entry_id
+            or entry_id != entry_id.strip()
+            for entry_id in allowed_nonrunning_homekit_entry_ids
+        )
+    ):
+        raise RuntimeError("The HomeKit runtime allowance is malformed")
+    if (
+        platform is not TargetPlatform.HOMEKIT
+        and allowed_nonrunning_homekit_entry_ids
+    ):
+        raise RuntimeError("A HomeKit runtime allowance cannot apply to another target")
+    if (
+        not isinstance(allowed_google_unrepresentable_entities, frozenset)
+        or any(
+            not isinstance(entity_id, str)
+            or not entity_id
+            or entity_id != entity_id.strip()
+            for entity_id in allowed_google_unrepresentable_entities
+        )
+    ):
+        raise RuntimeError("The Google compatibility allowance is malformed")
+    if (
+        platform is not TargetPlatform.GOOGLE
+        and allowed_google_unrepresentable_entities
+    ):
+        raise RuntimeError("A Google compatibility allowance cannot apply to another target")
     if platform is TargetPlatform.GOOGLE:
         entry, _, entity_config = _google_context(hass)
         if _state_value(entry) != "loaded":
@@ -1046,27 +1613,63 @@ async def async_validate_target(
         )
         if actual != expected:
             raise RuntimeError("Google Assistant exact readback mismatch")
+        detected_unrepresentable = google_native_unrepresentable_entities(
+            hass, expected
+        )
+        if detected_unrepresentable != allowed_google_unrepresentable_entities:
+            raise RuntimeError(
+                "Google compatibility allowance does not exactly match native support"
+            )
+        native_snapshot = await _google_native_snapshot(
+            hass, expected - detected_unrepresentable
+        )
         return {
             "loaded": True,
             "config_entries": 1,
             "expose_by_default": False,
             "yaml_runtime_match": True,
+            **native_snapshot,
+            "configured_sync_devices": len(expected),
+            "native_unrepresentable_devices": len(detected_unrepresentable),
         }
 
     if platform is TargetPlatform.HOMEKIT:
         entries = _managed_homekit_entries(hass, config)
-        _homekit_layout(entries)
+        _main, dedicated = _homekit_layout_for_config(entries, config)
+        dedicated_ids = frozenset(entry.entry_id for entry in dedicated)
+        lifecycle_ids = frozenset(
+            getattr(config, "homekit_lifecycle_entry_ids", ())
+        )
+        source_ids = frozenset(getattr(config, "homekit_source_entry_ids", ()))
+        if allowed_nonrunning_homekit_entry_ids - dedicated_ids:
+            raise RuntimeError(
+                "Only managed HomeKit side entries may use a runtime allowance"
+            )
+        if allowed_nonrunning_homekit_entry_ids - lifecycle_ids:
+            raise RuntimeError(
+                "A HomeKit runtime allowance is not lifecycle-owned"
+            )
+        if allowed_nonrunning_homekit_entry_ids & source_ids:
+            raise RuntimeError(
+                "A HomeKit source entry cannot use a runtime allowance"
+            )
         seen: set[str] = set()
         duplicates: set[str] = set()
         loaded = 0
         runtime_verified = 0
+        runtime_pending_prune = 0
         for entry in entries:
             if _state_value(entry) != "loaded":
                 raise RuntimeError("A managed HomeKit config entry is not loaded")
             runtime_running = _homekit_runtime_running(entry)
             if runtime_running is not True:
-                raise RuntimeError("A managed HomeKit runtime is not verifiably running")
-            runtime_verified += 1
+                if entry.entry_id not in allowed_nonrunning_homekit_entry_ids:
+                    raise HomeKitRuntimeUnavailableError(
+                        "A managed HomeKit runtime is not verifiably running"
+                    )
+                runtime_pending_prune += 1
+            else:
+                runtime_verified += 1
             loaded += 1
             values = set(_strict_homekit_target_entities(entry))
             duplicates.update(seen & values)
@@ -1080,7 +1683,9 @@ async def async_validate_target(
             "loaded_entries": loaded,
             "managed_entries": len(entries),
             "duplicates": 0,
+            "runtime_verified": runtime_pending_prune == 0,
             "runtime_verified_entries": runtime_verified,
+            "runtime_pending_prune_entries": runtime_pending_prune,
         }
 
     snapshot = await _read_matter_runtime_snapshot(config)
@@ -1145,15 +1750,28 @@ async def async_prepare_target(
     )
 
 
-async def _request_google_sync(hass: HomeAssistant) -> None:
-    """Request Google synchronization within a fixed overall deadline."""
+async def _request_google_sync(hass: HomeAssistant) -> dict[str, Any]:
+    """Request Google synchronization and verify only API acceptance."""
     try:
         async with asyncio.timeout(GOOGLE_SYNC_TIMEOUT):
-            await hass.services.async_call(
-                "google_assistant", "request_sync", blocking=True
-            )
+            native = _google_native_config(hass)
+            sync_all = getattr(native, "async_sync_entities_all", None)
+            if not callable(sync_all):
+                raise RuntimeError("Google Assistant request-sync result is unreadable")
+            status = int(await sync_all())
     except TimeoutError as error:
         raise RuntimeError("Google Assistant Request Sync timed out") from error
+    if status == HTTPStatus.NO_CONTENT:
+        raise RuntimeError("Google Assistant Request Sync has no linked Google Home user")
+    if status == HTTPStatus.NOT_FOUND:
+        raise RuntimeError("Google HomeGraph rejected Request Sync; relink is required")
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"Google Assistant Request Sync failed with HTTP {status}")
+    return {
+        "request_sync_accepted": True,
+        "request_sync_http_status": status,
+        "homegraph_readback_verified": False,
+    }
 
 
 async def _reload_homekit_entries(
@@ -1162,6 +1780,7 @@ async def _reload_homekit_entries(
     previous_runtime: Mapping[str, Any],
     *,
     rollback: bool = False,
+    force_reload: bool = False,
 ) -> None:
     """Let native UI listeners reload once; explicitly reload other entries."""
 
@@ -1170,7 +1789,8 @@ async def _reload_homekit_entries(
         old_runtime = previous_runtime.get(entry.entry_id)
         entry_source = _config_entry_source(entry)
         native_listener_expected = (
-            bool(entry_source)
+            not force_reload
+            and bool(entry_source)
             and entry_source != "import"
             and old_runtime is not None
         )
@@ -1203,12 +1823,119 @@ async def _reload_homekit_entries(
     # rollback.  A native HomeKit update listener runs outside these tasks, so
     # cancelling siblings on the first failure could race a still-running
     # apply reload against rollback.
-    results = await asyncio.gather(
-        *(reload_one(entry) for entry in entries), return_exceptions=True
+    async def settle_reloads() -> list[Any]:
+        return await asyncio.gather(
+            *(reload_one(entry) for entry in entries), return_exceptions=True
+        )
+
+    settle_task = asyncio.create_task(
+        settle_reloads(),
+        name="platform_sync settle HomeKit reloads",
     )
+    try:
+        results = await asyncio.shield(settle_task)
+    except asyncio.CancelledError as cancellation:
+        # A reload triggered by HomeKit's native options listener runs outside
+        # this task. Keep every bounded watcher alive until it settles so the
+        # caller cannot begin rollback while an apply reload is still running.
+        # Repeated cancellation requests must not interrupt that drain.
+        while not settle_task.done():
+            try:
+                await asyncio.shield(settle_task)
+            except asyncio.CancelledError:
+                continue
+        try:
+            settle_task.result()
+        except BaseException:
+            # Cancellation wins after the group has settled. Any per-entry
+            # failures are intentionally suppressed here because the caller is
+            # already unwinding into rollback.
+            pass
+        raise cancellation
     for result in results:
         if isinstance(result, BaseException):
             raise result
+
+
+async def async_recover_homekit_runtime(
+    hass: HomeAssistant,
+    config: SyncConfig,
+    expected: frozenset[str],
+) -> dict[str, Any]:
+    """Reload only exact, loaded HomeKit entries whose runtime stopped.
+
+    This recovery is intentionally narrower than reconciliation. It does not
+    update filters, remove entries, or cross a pairing boundary. The complete
+    target layout is rechecked before reload and validated again afterwards.
+    """
+    entries = _managed_homekit_entries(hass, config)
+    _homekit_layout_for_config(entries, config)
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for entry in entries:
+        if _state_value(entry) != "loaded":
+            raise RuntimeError("A managed HomeKit config entry is not loaded")
+        values = set(_strict_homekit_target_entities(entry))
+        duplicates.update(seen & values)
+        seen.update(values)
+    if duplicates or frozenset(seen) != expected:
+        raise RuntimeError(
+            "HomeKit runtime recovery requires an unchanged exact target layout"
+        )
+    stopped = [
+        entry for entry in entries if _homekit_runtime_running(entry) is not True
+    ]
+    if not stopped:
+        return await async_validate_target(
+            hass, config, TargetPlatform.HOMEKIT, expected
+        )
+    previous_runtime = {
+        entry.entry_id: getattr(entry, "runtime_data", None) for entry in stopped
+    }
+    await _reload_homekit_entries(
+        hass,
+        stopped,
+        previous_runtime=previous_runtime,
+        force_reload=True,
+    )
+    result = await async_validate_target(
+        hass, config, TargetPlatform.HOMEKIT, expected
+    )
+    return {**result, "runtime_recovered_entries": len(stopped)}
+
+
+async def _run_executor_mutation_settled(
+    hass: HomeAssistant, target: Callable[..., Any], *args: Any
+) -> Any:
+    """Finish a filesystem mutation before propagating caller cancellation.
+
+    Cancelling an asyncio Future cannot stop a function that is already running
+    in the executor. Draining the wrapper task prevents that late writer from
+    racing a rollback which begins after cancellation reaches the caller.
+    """
+
+    async def mutate() -> Any:
+        return await hass.async_add_executor_job(target, *args)
+
+    mutation_task = asyncio.create_task(
+        mutate(),
+        name="platform_sync settle executor mutation",
+    )
+    try:
+        return await asyncio.shield(mutation_task)
+    except asyncio.CancelledError as cancellation:
+        while not mutation_task.done():
+            try:
+                await asyncio.shield(mutation_task)
+            except asyncio.CancelledError:
+                continue
+        try:
+            mutation_task.result()
+        except BaseException:
+            # Cancellation wins after the mutation has settled. The caller's
+            # rollback still restores and independently validates its backup.
+            pass
+        raise cancellation
 
 
 async def _apply_google(
@@ -1219,39 +1946,98 @@ async def _apply_google(
 ) -> None:
     path, current = await _load_google_yaml(hass, config)
     updated = _build_google_config(current, desired, rooms)
-    await hass.async_add_executor_job(yaml_util.save_yaml, str(path), updated)
+    await _run_executor_mutation_settled(
+        hass, yaml_util.save_yaml, str(path), updated
+    )
     _, _, runtime_config = _google_context(hass)
     runtime_config.clear()
     runtime_config.update(deepcopy(updated))
+    await _google_native_sync_payload_snapshot(hass, desired)
     await _request_google_sync(hass)
+    await _google_native_sync_payload_snapshot(hass, desired)
+
+
+def homekit_missing_accessory_mode_entities(
+    hass: HomeAssistant, config: SyncConfig, desired: frozenset[str]
+) -> frozenset[str]:
+    """Return desired entities missing a dedicated HomeKit side entry.
+
+    Coverage by the main Bridge is deliberately ignored: an accessory-only
+    entity that was previously put there still needs to be deferred, removed
+    from the Bridge, and migrated to a separately paired Accessory entry.
+    """
+    if not hasattr(config, "homekit_managed_entry_ids"):
+        return frozenset()
+    entries = _managed_homekit_entries(hass, config)
+    _, dedicated = _homekit_layout_for_config(entries, config)
+    dedicated_coverage = frozenset().union(
+        *(_homekit_entities(entry) for entry in dedicated)
+    )
+    try:
+        from homeassistant.components.homekit.util import state_needs_accessory_mode
+    except (ImportError, AttributeError) as error:
+        raise RuntimeError(
+            "HomeKit accessory-mode classification is unavailable"
+        ) from error
+    missing: set[str] = set()
+    state_dependent_missing: set[str] = set()
+    for entity_id in sorted(desired - dedicated_coverage):
+        domain = entity_id.split(".", 1)[0]
+
+        # HA's native classifier routes cameras and locks solely by domain, so
+        # their entity IDs remain sufficient during a state-registry gap.
+        if domain in {"camera", "lock"}:
+            missing.add(entity_id)
+            continue
+
+        # TVs/receivers/projectors and activity remotes depend on attributes
+        # carried only by State. Missing state must never be interpreted as
+        # bridge-compatible, otherwise a transient startup gap can strand the
+        # entity in the wrong HomeKit mode permanently.
+        state = hass.states.get(entity_id)
+        if state is None:
+            if domain in {"media_player", "remote"}:
+                state_dependent_missing.add(entity_id)
+            continue
+        if state_needs_accessory_mode(state):
+            missing.add(entity_id)
+
+    if state_dependent_missing:
+        raise RuntimeError(
+            "HomeKit accessory-mode classification requires current state for "
+            f"{len(state_dependent_missing)} media player or remote entities"
+        )
+    return frozenset(missing)
+
+
+def homekit_new_accessory_mode_entities(
+    hass: HomeAssistant, config: SyncConfig, desired: frozenset[str]
+) -> frozenset[str]:
+    """Return accessory-mode entities not covered by a dedicated side entry.
+
+    The historical public name is retained for callers. Its result now also
+    includes accessory-only entities already misplaced on the main Bridge so
+    reconciliation can safely defer and migrate them.
+    """
+    return homekit_missing_accessory_mode_entities(hass, config, desired)
 
 
 async def _apply_homekit(
     hass: HomeAssistant, config: SyncConfig, desired: frozenset[str]
 ) -> None:
     entries = _managed_homekit_entries(hass, config)
-    main, dedicated = _homekit_layout(entries)
-    current_total = frozenset().union(*(_homekit_entities(entry) for entry in entries))
+    main, dedicated = _homekit_layout_for_config(entries, config)
     assigned: set[str] = set()
     for entry in dedicated:
         assigned.update(_homekit_entities(entry) & desired)
 
-    # Accessory creation includes a pairing flow. New entities that require it
-    # fail closed until the user creates and selects that side entry.
-    try:
-        from homeassistant.components.homekit.util import state_needs_accessory_mode
-
-        needs_accessory = {
-            entity_id
-            for entity_id in desired - current_total
-            if (state := hass.states.get(entity_id)) is not None
-            and state_needs_accessory_mode(state)
-        }
-    except (ImportError, AttributeError):
-        needs_accessory = frozenset()
+    # Accessory creation includes a pairing flow. Missing dedicated entries
+    # fail closed until the manager defers and migrates those entities.
+    needs_accessory = homekit_missing_accessory_mode_entities(hass, config, desired)
     if needs_accessory:
         raise RuntimeError(
-            f"New HomeKit accessory-mode entries must be created first: {len(needs_accessory)}"
+            "HomeKit accessory-mode entries must be created or migrated first: "
+            f"{len(needs_accessory)}"
         )
 
     updates: list[tuple[Any, dict[str, Any]]] = []
@@ -1298,6 +2084,25 @@ async def _apply_homekit(
 async def _save_matter_config(
     config: SyncConfig, plugin_config: Mapping[str, Any]
 ) -> None:
+    await _persist_matter_config(config, plugin_config)
+    try:
+        await _matter_request(
+            config, "restartplugin", {"pluginName": MATTER_PLUGIN}
+        )
+    except RuntimeError as restart_error:
+        # A stale pre-restart device snapshot can have the right count after an
+        # addition while still omitting the new endpoint.  Do not accept count
+        # convergence when the command result itself is uncertain; the caller
+        # must use a guarded full-process restart and generation barrier.
+        raise MatterbridgePluginRestartUncertainError(
+            "Matterbridge plugin restart result is uncertain"
+        ) from restart_error
+
+
+async def _persist_matter_config(
+    config: SyncConfig, plugin_config: Mapping[str, Any]
+) -> frozenset[str]:
+    """Persist and read back an exact Matterbridge plugin configuration."""
     expected = _strict_matter_allowlist(plugin_config)
     _require_empty_matter_filters(plugin_config)
     await _matter_request(
@@ -1306,20 +2111,7 @@ async def _save_matter_config(
         {"pluginName": MATTER_PLUGIN, "formData": deepcopy(dict(plugin_config))},
     )
     await _wait_matter_config_persisted(config, expected)
-    try:
-        await _matter_request(
-            config, "restartplugin", {"pluginName": MATTER_PLUGIN}
-        )
-    except RuntimeError as restart_error:
-        # A timeout, socket close, or response error after sending the command
-        # can all leave the remote restart running.  Never resend it: converge
-        # only by reading the exact allowlist and runtime until the deadline.
-        try:
-            await _wait_matter_runtime(config, expected)
-        except Exception as readback_error:
-            raise RuntimeError(
-                "Matterbridge restart result could not be verified"
-            ) from (restart_error if restart_error is not None else readback_error)
+    return expected
 
 
 async def _wait_matter_config_persisted(
@@ -1354,14 +2146,28 @@ async def _apply_matter(
     config: SyncConfig,
     desired: frozenset[str],
     *,
+    removed: frozenset[str] = frozenset(),
     before_matter_process_restart: Callable[[], bool] | None = None,
 ) -> bool:
     if not desired:
         raise RuntimeError(
             "Matterbridge whiteList cannot be empty because empty exposes everything"
         )
-    plugins = await _matter_request(config, "plugins")
-    plugin_config = _matter_plugin_config(_find_matter_plugin(plugins))
+    if removed:
+        snapshot = await _read_matter_runtime_snapshot(config)
+        actual_removed = snapshot.allowlist - desired
+        if actual_removed != removed:
+            raise RuntimeError(
+                "Matterbridge removal plan no longer matches the exact allowlist"
+            )
+        # Prove the generation fields are available before mutating config;
+        # read them again immediately before the restart to close the longer
+        # persistence window against an unrelated process restart.
+        _matter_process_generation(snapshot.settings)
+        plugin_config = deepcopy(dict(snapshot.plugin_config))
+    else:
+        plugins = await _matter_request(config, "plugins")
+        plugin_config = _matter_plugin_config(_find_matter_plugin(plugins))
     plugin_config["whiteList"] = sorted(desired)
     plugin_config["filterByArea"] = ""
     plugin_config["filterByLabel"] = ""
@@ -1372,7 +2178,64 @@ async def _apply_matter(
     plugin_config["deviceEntityBlackList"] = {}
     plugin_config["splitEntities"] = []
     plugin_config["splitByLabel"] = ""
-    await _save_matter_config(config, plugin_config)
+
+    if removed:
+        # Reserve the normal serialized transaction restart before persisting
+        # the narrower allowlist.  Recovery throttling is intentionally kept
+        # separate so two legitimate removal transactions can run back-to-back.
+        if (
+            before_matter_process_restart is None
+            or not before_matter_process_restart()
+        ):
+            raise RuntimeError(
+                "Matterbridge process restart was blocked before configuration change"
+            )
+        await _persist_matter_config(config, plugin_config)
+        settings = await _matter_request(config, "settings")
+        if not isinstance(settings, Mapping):
+            raise RuntimeError("Matterbridge settings response is unavailable")
+        generation = _matter_process_generation(settings)
+        try:
+            await _matter_fire_and_forget(config, "restart", {})
+            await _wait_matter_runtime(
+                config,
+                desired,
+                after_generation=generation,
+            )
+        except Exception as process_restart_error:
+            raise MatterbridgeProcessRestartError(
+                "Matterbridge process restart did not remove stale endpoints"
+            ) from process_restart_error
+        return True
+
+    try:
+        await _save_matter_config(config, plugin_config)
+    except MatterbridgePluginRestartUncertainError as plugin_restart_error:
+        snapshot = await _read_matter_runtime_snapshot(config)
+        if not _matter_process_restart_preflight(snapshot, desired):
+            raise RuntimeError(
+                "Matterbridge uncertain plugin restart could not be recovered safely"
+            ) from plugin_restart_error
+        generation = _matter_process_generation(snapshot.settings)
+        if (
+            before_matter_process_restart is None
+            or not before_matter_process_restart()
+        ):
+            raise RuntimeError(
+                "Matterbridge process restart was blocked by the recovery guard"
+            ) from plugin_restart_error
+        try:
+            await _matter_fire_and_forget(config, "restart", {})
+            await _wait_matter_runtime(
+                config,
+                desired,
+                after_generation=generation,
+            )
+        except Exception as process_restart_error:
+            raise MatterbridgeProcessRestartError(
+                "Matterbridge process restart did not verify an uncertain plugin restart"
+            ) from process_restart_error
+        return True
     try:
         await _wait_matter_runtime(config, desired)
         return False
@@ -1389,6 +2252,7 @@ async def _apply_matter(
             raise RuntimeError(
                 "Matterbridge plugin restart did not converge safely"
             ) from plugin_restart_error
+        generation = _matter_process_generation(snapshot.settings)
         if (
             before_matter_process_restart is None
             or not before_matter_process_restart()
@@ -1398,7 +2262,11 @@ async def _apply_matter(
             ) from plugin_restart_error
         try:
             await _matter_fire_and_forget(config, "restart", {})
-            await _wait_matter_runtime(config, desired)
+            await _wait_matter_runtime(
+                config,
+                desired,
+                after_generation=generation,
+            )
         except Exception as process_restart_error:
             raise MatterbridgeProcessRestartError(
                 "Matterbridge process restart did not restore the runtime"
@@ -1424,27 +2292,37 @@ async def async_apply_plan(
     return await _apply_matter(
         config,
         plan.desired,
+        removed=plan.removed,
         before_matter_process_restart=before_matter_process_restart,
     )
 
 
 async def async_restore_target(
-    hass: HomeAssistant, config: SyncConfig, backup: TargetBackup
+    hass: HomeAssistant,
+    config: SyncConfig,
+    backup: TargetBackup,
+    *,
+    allowed_nonrunning_homekit_entry_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Restore one target and verify its pre-change exact set."""
     payload = backup.payload
     if backup.platform is TargetPlatform.GOOGLE:
         path: Path = payload["path"]
         if payload["existed"]:
-            await hass.async_add_executor_job(path.write_bytes, payload["raw"])
+            await _run_executor_mutation_settled(
+                hass, path.write_bytes, payload["raw"]
+            )
         elif path.exists():
-            await hass.async_add_executor_job(path.unlink)
+            await _run_executor_mutation_settled(hass, path.unlink)
         _, _, runtime_config = _google_context(hass)
         runtime_config.clear()
         runtime_config.update(deepcopy(payload["runtime"]))
+        await _google_native_sync_payload_snapshot(hass, payload["entities"])
         await _request_google_sync(hass)
+        await _google_native_sync_payload_snapshot(hass, payload["entities"])
     elif backup.platform is TargetPlatform.HOMEKIT:
         entries = _managed_homekit_entries(hass, config)
+        _homekit_layout_for_config(entries, config)
         by_id = {entry.entry_id: entry for entry in entries}
         previous_runtime: dict[str, Any] = {}
         changed_entries: list[Any] = []
@@ -1478,6 +2356,35 @@ async def async_restore_target(
                 "YAML/import-owned Accessories changed after backup"
             )
     else:
-        await _save_matter_config(config, payload["config"])
-        await _wait_matter_runtime(config, payload["entities"])
-    await async_validate_target(hass, config, backup.platform, payload["entities"])
+        preflight_settings = await _matter_request(config, "settings")
+        if not isinstance(preflight_settings, Mapping):
+            raise RuntimeError("Matterbridge settings response is unavailable")
+        _matter_process_generation(preflight_settings)
+        await _persist_matter_config(config, payload["config"])
+        settings = await _matter_request(config, "settings")
+        if not isinstance(settings, Mapping):
+            raise RuntimeError("Matterbridge settings response is unavailable")
+        generation = _matter_process_generation(settings)
+        # Restoring an earlier allowlist may itself remove endpoints. A plugin
+        # restart is insufficient because matterbridge-hass can leave the old
+        # bridged endpoints registered in this process.
+        await _matter_fire_and_forget(config, "restart", {})
+        await _wait_matter_runtime(
+            config,
+            payload["entities"],
+            after_generation=generation,
+        )
+    if allowed_nonrunning_homekit_entry_ids:
+        await async_validate_target(
+            hass,
+            config,
+            backup.platform,
+            payload["entities"],
+            allowed_nonrunning_homekit_entry_ids=(
+                allowed_nonrunning_homekit_entry_ids
+            ),
+        )
+    else:
+        await async_validate_target(
+            hass, config, backup.platform, payload["entities"]
+        )

@@ -10,7 +10,12 @@ from .const import (
     ALL_TARGETS,
     CONF_ENABLED,
     CONF_GOOGLE_CONFIG_PATH,
+    CONF_HOMEKIT_ACCESSORY_CONFIG_PATH,
+    CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS,
+    CONF_HOMEKIT_MAIN_ENTRY_ID,
     CONF_HOMEKIT_MANAGED_ENTRY_IDS,
+    CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS,
+    CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS,
     CONF_HOMEKIT_SOURCE_ENTRY_IDS,
     CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION,
     CONF_LOCKED_RULES,
@@ -26,6 +31,7 @@ from .const import (
     CONF_USER_RULES,
     DEFAULT_ENABLED,
     DEFAULT_GOOGLE_CONFIG_PATH,
+    DEFAULT_HOMEKIT_ACCESSORY_CONFIG_PATH,
     DEFAULT_MATTER_HOST,
     DEFAULT_MATTER_PASSWORD,
     DEFAULT_MATTER_PORT,
@@ -54,9 +60,14 @@ class SyncConfig:
     google_config_path: str
     homekit_source_entry_ids: tuple[str, ...]
     homekit_managed_entry_ids: tuple[str, ...]
+    homekit_main_entry_id: str
+    homekit_lifecycle_entry_ids: tuple[str, ...]
+    homekit_pending_pairing_entry_ids: tuple[str, ...]
+    homekit_restart_required_entry_ids: tuple[str, ...]
+    homekit_accessory_config_path: str
     user_rules: Mapping[TargetPlatform, PlatformRule]
     locked_rules: Mapping[TargetPlatform, PlatformRule]
-    locked_homekit_apple_tv_exclusion: bool = False
+    locked_homekit_apple_tv_exclusion: bool = True
 
     @classmethod
     def from_entry(cls, data: Mapping[str, Any], options: Mapping[str, Any]) -> "SyncConfig":
@@ -104,10 +115,29 @@ class SyncConfig:
             homekit_managed_entry_ids=normalize_config_entry_ids(
                 merged.get(CONF_HOMEKIT_MANAGED_ENTRY_IDS, [])
             ),
+            homekit_main_entry_id=normalize_optional_config_entry_id(
+                merged.get(CONF_HOMEKIT_MAIN_ENTRY_ID, "")
+            ),
+            homekit_lifecycle_entry_ids=normalize_config_entry_ids(
+                merged.get(CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS, [])
+            ),
+            homekit_pending_pairing_entry_ids=normalize_config_entry_ids(
+                merged.get(CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS, [])
+            ),
+            homekit_restart_required_entry_ids=normalize_config_entry_ids(
+                merged.get(CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS, [])
+            ),
+            homekit_accessory_config_path=str(
+                merged.get(
+                    CONF_HOMEKIT_ACCESSORY_CONFIG_PATH,
+                    DEFAULT_HOMEKIT_ACCESSORY_CONFIG_PATH,
+                )
+                or ""
+            ).strip(),
             user_rules=parse_rules(merged.get(CONF_USER_RULES)),
             locked_rules=locked_rules,
             locked_homekit_apple_tv_exclusion=bool(
-                data.get(CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION, False)
+                data.get(CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION, True)
             ),
         )
 
@@ -177,6 +207,17 @@ def normalize_config_entry_ids(
     if required and not result:
         raise ValueError("At least one HomeKit source Config Entry is required")
     return tuple(result)
+
+
+def normalize_optional_config_entry_id(value: object) -> str:
+    """Return one optional durable Config Entry ID without coercing types."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("Config Entry ID must be a string")
+    if value != value.strip():
+        raise ValueError("Config Entry ID must not contain surrounding whitespace")
+    return value
 
 
 def normalize_dashboard_pages(

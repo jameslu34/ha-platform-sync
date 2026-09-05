@@ -1,14 +1,14 @@
-"""Tests for Lovelace source extraction."""
+"""Dependency-light tests for Lovelace source extraction."""
 
 import asyncio
 from types import SimpleNamespace
 
-from custom_components.platform_sync.const import SourceKind
-from custom_components.platform_sync.sources import (
-    _select_dashboard_instance,
-    async_read_source,
-    extract_dashboard_entities,
-)
+from simulate_adapter_acceptance import const, sources_module
+
+SourceKind = const.SourceKind
+_select_dashboard_instance = sources_module._select_dashboard_instance
+async_read_source = sources_module.async_read_source
+extract_dashboard_entities = sources_module.extract_dashboard_entities
 
 
 def test_extract_selected_view_and_nested_entities() -> None:
@@ -36,6 +36,56 @@ def test_extract_selected_view_and_nested_entities() -> None:
     assert result.entities == {"light.main", "switch.fan", "sensor.temp"}
     assert "light.skip" not in result.entities
     assert result.rooms["switch.fan"] == "客廳"
+
+
+def test_extract_camera_specific_fields_and_arbitrary_nested_cards() -> None:
+    result = extract_dashboard_entities(
+        {
+            "views": [
+                {
+                    "path": "default-view",
+                    "cards": [
+                        {
+                            "type": "picture-elements",
+                            "camera_image": "camera.front_door",
+                            "elements": [
+                                {"type": "state-icon", "entity": "camera.side"}
+                            ],
+                        },
+                        {
+                            "type": "custom:camera-card",
+                            "camera_entity": "camera.live_view",
+                            "card": {"entity": "sensor.camera_health"},
+                            "visibility": [
+                                {
+                                    "condition": "state",
+                                    "entity": "input_boolean.visibility_only",
+                                }
+                            ],
+                        },
+                        {
+                            "type": "conditional",
+                            "conditions": [
+                                {
+                                    "condition": "state",
+                                    "entity": "binary_sensor.condition_only",
+                                }
+                            ],
+                            "card": {"entity": "light.visible_card"},
+                        },
+                    ],
+                }
+            ]
+        },
+        "default-view",
+    )
+    assert result.entities == {
+        "camera.front_door",
+        "camera.side",
+        "camera.live_view",
+        "sensor.camera_health",
+        "light.visible_card",
+    }
 
 
 def test_named_lovelace_dashboard_precedes_legacy_default() -> None:
@@ -146,3 +196,14 @@ def test_multiple_dashboard_views_empty_aggregate_fails_closed() -> None:
         pass
     else:
         raise AssertionError("empty multi-view source must fail closed")
+
+
+if __name__ == "__main__":
+    tests = [
+        value
+        for name, value in sorted(globals().copy().items())
+        if name.startswith("test_") and callable(value)
+    ]
+    for test in tests:
+        test()
+    print(f"PASS: {len(tests)} Lovelace source tests")

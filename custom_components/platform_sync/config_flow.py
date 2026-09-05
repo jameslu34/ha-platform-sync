@@ -19,14 +19,21 @@ from .config import (
     SyncConfig,
     merge_entry_settings,
     normalize_config_entry_ids,
+    normalize_optional_config_entry_id,
     normalize_dashboard_pages,
 )
 from .const import (
     ALL_TARGETS,
     CONF_ENABLED,
     CONF_GOOGLE_CONFIG_PATH,
+    CONF_HOMEKIT_ACCESSORY_CONFIG_PATH,
+    CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS,
+    CONF_HOMEKIT_MAIN_ENTRY_ID,
     CONF_HOMEKIT_MANAGED_ENTRY_IDS,
+    CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS,
+    CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS,
     CONF_HOMEKIT_SOURCE_ENTRY_IDS,
+    CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION,
     CONF_LOCKED_RULES,
     CONF_MATTER_HOST,
     CONF_MATTER_PASSWORD,
@@ -40,6 +47,7 @@ from .const import (
     CONF_USER_RULES,
     DEFAULT_ENABLED,
     DEFAULT_GOOGLE_CONFIG_PATH,
+    DEFAULT_HOMEKIT_ACCESSORY_CONFIG_PATH,
     DEFAULT_MATTER_HOST,
     DEFAULT_MATTER_PASSWORD,
     DEFAULT_MATTER_PORT,
@@ -51,9 +59,11 @@ from .const import (
     SourceKind,
     TargetPlatform,
 )
-from .models import normalize_entities, parse_rules
+from .models import evaluate_target, normalize_entities, parse_rules
+from .homekit_pairing import homekit_entry_entities, homekit_entry_is_paired
 from .sources import (
     EmptyDashboardSourceError,
+    async_find_apple_tv_entities,
     async_read_dashboard_source,
     async_read_dashboard_sources,
 )
@@ -63,6 +73,8 @@ from .targets import (
     HomeKitSourceEntryUnavailableError,
     HomeKitSourceFilterUnsupportedError,
     async_validate_homekit_source_entries,
+    homekit_managed_main_entry_id,
+    homekit_new_accessory_mode_entities,
     validate_target_configuration,
 )
 
@@ -83,6 +95,11 @@ _EDITABLE_KEYS = {
     CONF_MATTER_PORT,
     CONF_MATTER_PASSWORD,
     CONF_GOOGLE_CONFIG_PATH,
+    CONF_HOMEKIT_ACCESSORY_CONFIG_PATH,
+    CONF_HOMEKIT_MAIN_ENTRY_ID,
+    CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS,
+    CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS,
+    CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS,
     CONF_HOMEKIT_SOURCE_ENTRY_IDS,
     CONF_HOMEKIT_MANAGED_ENTRY_IDS,
 }
@@ -116,6 +133,11 @@ def _homekit_mode(entry: Any) -> str:
         if isinstance(mode, str) and mode:
             return mode.casefold()
     return "bridge"
+
+
+def _config_entry_source(entry: Any) -> str:
+    source = getattr(entry, "source", None)
+    return str(getattr(source, "value", source or "")).casefold()
 
 
 def _homekit_choices(
@@ -664,6 +686,43 @@ class _ConditionalFlowMixin:
                     multiple=True,
                 )
             )
+            schema[
+                vol.Optional(
+                    CONF_HOMEKIT_MAIN_ENTRY_ID,
+                    default=self._value(CONF_HOMEKIT_MAIN_ENTRY_ID, ""),
+                )
+            ] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=_homekit_choices(
+                        self.hass,
+                        [self._value(CONF_HOMEKIT_MAIN_ENTRY_ID, "")],
+                    ),
+                    multiple=False,
+                )
+            )
+            schema[
+                vol.Optional(
+                    CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS,
+                    default=self._value(CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS, []),
+                )
+            ] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=_homekit_choices(
+                        self.hass,
+                        self._value(CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS, []),
+                    ),
+                    multiple=True,
+                )
+            )
+            schema[
+                vol.Optional(
+                    CONF_HOMEKIT_ACCESSORY_CONFIG_PATH,
+                    default=self._value(
+                        CONF_HOMEKIT_ACCESSORY_CONFIG_PATH,
+                        DEFAULT_HOMEKIT_ACCESSORY_CONFIG_PATH,
+                    ),
+                )
+            ] = str
         if source is SourceKind.MATTER or TargetPlatform.MATTER in targets:
             schema[
                 vol.Required(
@@ -752,6 +811,14 @@ class _ConditionalFlowMixin:
         result.setdefault(CONF_GOOGLE_CONFIG_PATH, DEFAULT_GOOGLE_CONFIG_PATH)
         result.setdefault(CONF_HOMEKIT_SOURCE_ENTRY_IDS, [])
         result.setdefault(CONF_HOMEKIT_MANAGED_ENTRY_IDS, [])
+        result.setdefault(CONF_HOMEKIT_MAIN_ENTRY_ID, "")
+        result.setdefault(CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS, [])
+        result.setdefault(CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS, [])
+        result.setdefault(CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS, [])
+        result.setdefault(
+            CONF_HOMEKIT_ACCESSORY_CONFIG_PATH,
+            DEFAULT_HOMEKIT_ACCESSORY_CONFIG_PATH,
+        )
 
         # Canonicalize every persisted field, including values currently hidden
         # by the conditional UI.  This keeps a malformed legacy or manually
@@ -815,6 +882,9 @@ class _ConditionalFlowMixin:
         for entry_key in (
             CONF_HOMEKIT_SOURCE_ENTRY_IDS,
             CONF_HOMEKIT_MANAGED_ENTRY_IDS,
+            CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS,
+            CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS,
+            CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS,
         ):
             try:
                 result[entry_key] = list(
@@ -822,6 +892,19 @@ class _ConditionalFlowMixin:
                 )
             except ValueError:
                 result[entry_key] = []
+        try:
+            result[CONF_HOMEKIT_MAIN_ENTRY_ID] = normalize_optional_config_entry_id(
+                result.get(CONF_HOMEKIT_MAIN_ENTRY_ID)
+            )
+        except ValueError:
+            result[CONF_HOMEKIT_MAIN_ENTRY_ID] = ""
+        result[CONF_HOMEKIT_ACCESSORY_CONFIG_PATH] = str(
+            result.get(
+                CONF_HOMEKIT_ACCESSORY_CONFIG_PATH,
+                DEFAULT_HOMEKIT_ACCESSORY_CONFIG_PATH,
+            )
+            or ""
+        ).strip()
         existing_rules = deepcopy(self._defaults.get(CONF_USER_RULES, {}))
         targets = set(result.get(CONF_TARGET_PLATFORMS, []))
         packed_rules: dict[str, dict[str, list[str]]] = {}
@@ -867,6 +950,26 @@ class _ConditionalFlowMixin:
             }
             if set(config.homekit_managed_entry_ids) - set(available):
                 return "homekit_target_entry_not_found"
+            lifecycle = set(config.homekit_lifecycle_entry_ids)
+            try:
+                main_entry_id = homekit_managed_main_entry_id(self.hass, config)
+            except RuntimeError:
+                return "homekit_target_configuration_invalid"
+            if (
+                lifecycle - set(config.homekit_managed_entry_ids)
+                or lifecycle & set(config.homekit_source_entry_ids)
+                or main_entry_id in lifecycle
+                or any(
+                    len(homekit_entry_entities(available[entry_id])) != 1
+                    for entry_id in lifecycle
+                )
+                or any(
+                    _config_entry_source(available[entry_id]) == "import"
+                    for entry_id in lifecycle
+                )
+                and not config.homekit_accessory_config_path
+            ):
+                return "homekit_lifecycle_invalid"
             try:
                 validate_target_configuration(
                     self.hass, config, TargetPlatform.HOMEKIT
@@ -926,6 +1029,55 @@ class _ConditionalFlowMixin:
                     errors[CONF_HOMEKIT_MANAGED_ENTRY_IDS] = (
                         "homekit_entry_required"
                     )
+                try:
+                    lifecycle_ids = list(
+                        normalize_config_entry_ids(
+                            user_input.get(CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS, [])
+                        )
+                    )
+                except ValueError:
+                    errors[CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS] = (
+                        "homekit_lifecycle_invalid"
+                    )
+                    lifecycle_ids = []
+                managed_ids = set(user_input.get(CONF_HOMEKIT_MANAGED_ENTRY_IDS, []))
+                try:
+                    main_entry_id = normalize_optional_config_entry_id(
+                        user_input.get(CONF_HOMEKIT_MAIN_ENTRY_ID)
+                    )
+                except ValueError:
+                    main_entry_id = ""
+                    errors[CONF_HOMEKIT_MAIN_ENTRY_ID] = (
+                        "homekit_target_configuration_invalid"
+                    )
+                if main_entry_id and main_entry_id not in managed_ids:
+                    errors[CONF_HOMEKIT_MAIN_ENTRY_ID] = (
+                        "homekit_target_configuration_invalid"
+                    )
+                user_input[CONF_HOMEKIT_MAIN_ENTRY_ID] = main_entry_id
+                if set(lifecycle_ids) - managed_ids:
+                    errors[CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS] = (
+                        "homekit_lifecycle_invalid"
+                    )
+                user_input[CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS] = lifecycle_ids
+                yaml_path = str(
+                    user_input.get(CONF_HOMEKIT_ACCESSORY_CONFIG_PATH, "")
+                ).strip()
+                if yaml_path:
+                    parsed_yaml = PurePosixPath(yaml_path)
+                    if (
+                        parsed_yaml.is_absolute()
+                        or ".." in parsed_yaml.parts
+                        or "\\" in yaml_path
+                        or parsed_yaml.suffix.casefold() not in {".yaml", ".yml"}
+                        or parsed_yaml.name.casefold()
+                        in {"configuration.yaml", "configuration.yml"}
+                    ):
+                        errors[CONF_HOMEKIT_ACCESSORY_CONFIG_PATH] = "invalid_path"
+                    else:
+                        user_input[CONF_HOMEKIT_ACCESSORY_CONFIG_PATH] = yaml_path
+                else:
+                    user_input[CONF_HOMEKIT_ACCESSORY_CONFIG_PATH] = ""
             if relevant_matter:
                 host = str(user_input.get(CONF_MATTER_HOST, "")).strip()
                 try:
@@ -965,6 +1117,22 @@ class _ConditionalFlowMixin:
             if not errors:
                 self._accept_values(user_input)
                 user_data = self._compose_user_data()
+                if relevant_homekit and not user_data.get(
+                    CONF_HOMEKIT_MAIN_ENTRY_ID
+                ):
+                    try:
+                        inferred_main = homekit_managed_main_entry_id(
+                            self.hass, self._candidate_config(user_data)
+                        )
+                    except RuntimeError:
+                        errors[CONF_HOMEKIT_MAIN_ENTRY_ID] = (
+                            "homekit_target_configuration_invalid"
+                        )
+                    else:
+                        self._accept_values(
+                            {CONF_HOMEKIT_MAIN_ENTRY_ID: inferred_main}
+                        )
+                        user_data = self._compose_user_data()
                 readiness_error = await self._validate_platform_readiness(user_data)
                 if readiness_error:
                     errors["base"] = readiness_error
@@ -1053,13 +1221,327 @@ class _ConditionalFlowMixin:
             f"Automatic synchronization: {'Enabled' if enabled else 'Disabled'}"
         )
 
+    async def _manual_pairing_preview(self) -> str:
+        """List controller-side pairing that the current exact plan will require."""
+        zh = _is_zh_hant(self.hass)
+        user_data = self._compose_user_data()
+        try:
+            config = self._candidate_config(user_data)
+        except (TypeError, ValueError):
+            return (
+                "首次同步完成後會顯示需要額外配對的裝置。"
+                if zh
+                else "Devices requiring extra pairing will be listed after the first synchronization."
+            )
+        if not config.enabled:
+            return "同步目前停用。" if zh else "Synchronization is currently disabled."
+
+        source_entities: frozenset[str] | None = None
+        deferred_message: str | None = None
+        try:
+            if config.source_kind is SourceKind.MANUAL:
+                source_entities = config.source_entities
+            elif config.source_kind is SourceKind.DASHBOARD:
+                source_entities = (
+                    await async_read_dashboard_sources(
+                        self.hass, config.source_pages
+                    )
+                ).entities
+            elif config.source_kind is SourceKind.HOMEKIT:
+                source_entities = await async_validate_homekit_source_entries(
+                    self.hass, config.homekit_source_entry_ids
+                )
+            else:
+                deferred_message = (
+                    "此同步來源需在設定儲存後才能安全讀取；首次同步完成時會用 Home Assistant 持續通知逐項列出需要配對或確認的裝置。"
+                    if zh
+                    else "This source can be read safely only after the configuration is saved. The first synchronization will list every device requiring pairing or verification in a persistent Home Assistant notification."
+                )
+        except Exception:
+            _LOGGER.debug("Unable to preview the synchronization source", exc_info=True)
+            deferred_message = (
+                "目前無法預先讀取完整來源清單；首次同步完成後會在 Home Assistant 持續通知中逐項列出。"
+                if zh
+                else "The complete source list cannot be previewed now; the first synchronization will list every item in a persistent Home Assistant notification."
+            )
+
+        homekit_pair_entities: set[str] = set()
+        homekit_check_entities: set[str] = set()
+        homekit_pair_bridges: list[tuple[str, str]] = []
+        homekit_check_bridges: list[tuple[str, str]] = []
+        matter_entities: set[str] = set()
+        malformed_pending: list[str] = []
+        if TargetPlatform.HOMEKIT in config.targets:
+            desired_homekit: frozenset[str] | None = None
+            main_entry_id: str | None = None
+            if config.homekit_managed_entry_ids:
+                try:
+                    main_entry_id = homekit_managed_main_entry_id(self.hass, config)
+                except RuntimeError:
+                    # The previous form's readiness validation normally catches
+                    # this. Keep the review truthful if entries change while the
+                    # final step is open.
+                    deferred_message = (
+                        "HomeKit 主 Bridge 目前無法精確辨識；請返回上一頁重新確認選取項目。"
+                        if zh
+                        else "The main HomeKit Bridge cannot currently be identified exactly; return to the previous page and review the selection."
+                    )
+            if source_entities is not None:
+                try:
+                    dynamic_exclude = (
+                        await async_find_apple_tv_entities(self.hass)
+                        if config.locked_homekit_apple_tv_exclusion
+                        else frozenset()
+                    )
+                    plan = evaluate_target(
+                        source_entities,
+                        frozenset(),
+                        config.user_rules[TargetPlatform.HOMEKIT],
+                        config.locked_rules[TargetPlatform.HOMEKIT],
+                        TargetPlatform.HOMEKIT,
+                        dynamic_exclude,
+                    )
+                    desired_homekit = plan.desired
+                    # These entries do not exist yet, so every item will need a
+                    # native Apple Home pairing after the first reconciliation.
+                    homekit_pair_entities.update(
+                        homekit_new_accessory_mode_entities(
+                            self.hass, config, plan.desired
+                        )
+                    )
+                except Exception:
+                    _LOGGER.debug(
+                        "Unable to preview new HomeKit accessory entries",
+                        exc_info=True,
+                    )
+                    deferred_message = deferred_message or (
+                        "目前無法預先讀取完整 HomeKit 清單；首次同步完成後會在 Home Assistant 持續通知中逐項列出。"
+                        if zh
+                        else "The complete HomeKit list cannot be previewed now; the first synchronization will list every item in a persistent Home Assistant notification."
+                    )
+
+            pending_ids = set(config.homekit_pending_pairing_entry_ids)
+            lifecycle_ids = set(config.homekit_lifecycle_entry_ids)
+            inspect_ids = pending_ids | set(config.homekit_managed_entry_ids)
+            for entry_id in sorted(inspect_ids):
+                entry = self.hass.config_entries.async_get_entry(entry_id)
+                if entry is None:
+                    continue
+                if entry_id == main_entry_id:
+                    paired = homekit_entry_is_paired(entry)
+                    bridge = (
+                        str(getattr(entry, "title", None) or "HomeKit Bridge"),
+                        entry_id,
+                    )
+                    if paired is False:
+                        homekit_pair_bridges.append(bridge)
+                    elif paired is None:
+                        homekit_check_bridges.append(bridge)
+                    continue
+                # The managed set also contains the main Bridge.  Only native
+                # accessory entries, explicit lifecycle side entries, or a
+                # durable pending record can require per-device pairing.
+                if (
+                    entry_id not in pending_ids
+                    and entry_id not in lifecycle_ids
+                    and _homekit_mode(entry) != "accessory"
+                ):
+                    continue
+                entities = homekit_entry_entities(entry)
+                if len(entities) != 1:
+                    if entry_id in pending_ids:
+                        malformed_pending.append(entry_id)
+                    continue
+                entity_id = next(iter(entities))
+                # Do not ask the owner to pair an accessory that the submitted
+                # exact plan will remove.  With a remote source, the desired set
+                # is intentionally unknown until the first safe reconciliation,
+                # so retain only durable pending items rather than guessing from
+                # every currently managed accessory.
+                if desired_homekit is not None and entity_id not in desired_homekit:
+                    continue
+                if desired_homekit is None and entry_id not in pending_ids:
+                    continue
+                paired = homekit_entry_is_paired(entry)
+                if paired is True:
+                    continue
+                if paired is False:
+                    homekit_pair_entities.add(entity_id)
+                else:
+                    homekit_check_entities.add(entity_id)
+
+        # A newly-created accessory is known to need pairing even if an
+        # overlapping stale entry had no readable runtime state.
+        homekit_check_entities.difference_update(homekit_pair_entities)
+
+        if TargetPlatform.MATTER in config.targets and source_entities is not None:
+            try:
+                plan = evaluate_target(
+                    source_entities,
+                    frozenset(),
+                    config.user_rules[TargetPlatform.MATTER],
+                    config.locked_rules[TargetPlatform.MATTER],
+                    TargetPlatform.MATTER,
+                )
+                # Config Flow deliberately performs no Matterbridge network
+                # probe. Runtime sync refines this list using enableServerRvc;
+                # here every desired vacuum is shown as a possible separate
+                # server node so completion never hides required owner work.
+                matter_entities.update(
+                    entity_id
+                    for entity_id in plan.desired
+                    if entity_id.startswith("vacuum.")
+                )
+            except Exception:
+                _LOGGER.debug(
+                    "Unable to preview Matter manual pairing requirements",
+                    exc_info=True,
+                )
+                deferred_message = deferred_message or (
+                    "目前無法預先讀取完整 Matter 清單；首次同步完成後會在 Home Assistant 持續通知中逐項列出。"
+                    if zh
+                    else "The complete Matter list cannot be previewed now; the first synchronization will list every item in a persistent Home Assistant notification."
+                )
+        sections: list[str] = []
+
+        def _labels(entities: frozenset[str]) -> list[str]:
+            labels: list[str] = []
+            for entity_id in sorted(entities):
+                state = self.hass.states.get(entity_id)
+                name = (
+                    state.attributes.get("friendly_name")
+                    if state is not None
+                    else None
+                )
+                labels.append(
+                    f"{name or entity_id}（{entity_id}）"
+                    if zh
+                    else f"{name or entity_id} ({entity_id})"
+                )
+            return labels
+
+        def _bridge_labels(entries: list[tuple[str, str]]) -> list[str]:
+            return [
+                f"{title}（HomeKit Bridge，{entry_id[:8]}）"
+                if zh
+                else f"{title} (HomeKit Bridge, {entry_id[:8]})"
+                for title, entry_id in entries
+            ]
+
+        if homekit_pair_bridges:
+            heading = (
+                "需要在 Apple Home 額外配對 HomeKit Bridge："
+                if zh
+                else "Requires additional HomeKit Bridge pairing in Apple Home:"
+            )
+            sections.append(
+                heading
+                + "\n"
+                + "\n".join(
+                    f"- {label}" for label in _bridge_labels(homekit_pair_bridges)
+                )
+            )
+        if homekit_check_bridges:
+            heading = (
+                "需要在 Apple Home 確認 HomeKit Bridge 配對狀態（尚未配對才加入）："
+                if zh
+                else "Check HomeKit Bridge pairing status in Apple Home (add it only if it is not already paired):"
+            )
+            sections.append(
+                heading
+                + "\n"
+                + "\n".join(
+                    f"- {label}" for label in _bridge_labels(homekit_check_bridges)
+                )
+            )
+
+        if homekit_pair_entities:
+            heading = (
+                "需要在 Apple Home 額外配對："
+                if zh
+                else "Requires additional pairing in Apple Home:"
+            )
+            sections.append(
+                heading
+                + "\n"
+                + "\n".join(
+                    f"- {label}" for label in _labels(frozenset(homekit_pair_entities))
+                )
+            )
+        if homekit_check_entities:
+            heading = (
+                "需要在 Apple Home 確認配對狀態（尚未配對才加入 accessory）："
+                if zh
+                else "Check pairing status in Apple Home (add the accessory only if it is not already paired):"
+            )
+            sections.append(
+                heading
+                + "\n"
+                + "\n".join(
+                    f"- {label}" for label in _labels(frozenset(homekit_check_entities))
+                )
+            )
+        if malformed_pending:
+            sections.append(
+                (
+                    "HomeKit 尚有配對追蹤項目無法精確辨識，請開啟此外掛設定重新選取對應的單一 accessory："
+                    if zh
+                    else "Some pending HomeKit pairing entries cannot be identified exactly; reopen this integration and select the corresponding single-entity accessories:"
+                )
+                + "\n"
+                + "\n".join(f"- {entry_id}" for entry_id in malformed_pending)
+            )
+        if matter_entities:
+            heading = (
+                "可能是 Matter 獨立 server node；首次同步會依 Matterbridge 設定確認。若清單仍出現在通知中，請到 Matterbridge Devices 頁確認配對狀態（若尚未配對才掃描 QR code）："
+                if zh
+                else "Possible separate Matter server nodes; the first sync will verify the Matterbridge setting. If an item remains in the notification, check it in the Devices panel (scan its QR code only if it is not already paired):"
+            )
+            sections.append(
+                heading
+                + "\n"
+                + "\n".join(f"- {label}" for label in _labels(matter_entities))
+            )
+        if deferred_message:
+            sections.append(deferred_message)
+        if not sections:
+            statuses: list[str] = []
+            if TargetPlatform.GOOGLE in config.targets:
+                statuses.append(
+                    "- Google Home：帳戶完成一次連結後，不需逐裝置配對。"
+                    if zh
+                    else "- Google Home: once the account is linked, individual synchronized devices do not require pairing."
+                )
+            if TargetPlatform.HOMEKIT in config.targets:
+                statuses.append(
+                    "- HomeKit：目前沒有已知需要在 Apple Home 額外配對的裝置。"
+                    if zh
+                    else "- HomeKit: no device is currently known to require additional Apple Home pairing."
+                )
+            if TargetPlatform.MATTER in config.targets:
+                statuses.append(
+                    "- Matter：一般 Bridge 端點不需逐裝置配對；只有獨立 server node 需要另行確認。"
+                    if zh
+                    else "- Matter: normal Bridge endpoints do not require per-device pairing; only separate server nodes need an additional check."
+                )
+            return "\n".join(statuses) or (
+                "目前沒有新裝置需要逐裝置人工配對。"
+                if zh
+                else "No new device currently requires per-device pairing."
+            )
+        return "\n\n".join(sections)
+
     async def async_step_confirm(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
             return self._finish(self._compose_user_data())
+        pairing = await self._manual_pairing_preview()
         return self.async_show_form(
             step_id="confirm",
             data_schema=vol.Schema({}),
-            description_placeholders={"summary": self._summary()},
+            description_placeholders={
+                "summary": self._summary(),
+                "manual_pairing": pairing,
+            },
             last_step=True,
         )
 
@@ -1071,7 +1553,7 @@ class PlatformSyncConfigFlow(
     _ConditionalFlowMixin, config_entries.ConfigFlow, domain=DOMAIN
 ):
     VERSION = 4
-    MINOR_VERSION = 3
+    MINOR_VERSION = 4
 
     def __init__(self) -> None:
         super().__init__()
@@ -1083,6 +1565,8 @@ class PlatformSyncConfigFlow(
         return await self._async_source_step("user", user_input)
 
     def _finish(self, user_data: dict[str, Any]):
+        user_data = dict(user_data)
+        user_data[CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION] = True
         return self.async_create_entry(
             title=_default_entry_title(self.hass), data=user_data
         )
@@ -1110,4 +1594,50 @@ class PlatformSyncOptionsFlow(
         return await self._async_source_step("init", user_input)
 
     def _finish(self, user_data: dict[str, Any]):
-        return self.async_create_entry(data=user_data)
+        # A running reconciliation may create or remove an owned HomeKit
+        # accessory while this multi-step Options Flow is open. Apply only the
+        # user's selection delta to the latest ledger instead of overwriting
+        # it with the flow's opening snapshot.
+        latest = merge_entry_settings(
+            self._entry.data, self._entry.options
+        )
+        merged = dict(user_data)
+
+        def _safe_ids(value: Any) -> set[str]:
+            try:
+                return set(normalize_config_entry_ids(value))
+            except ValueError:
+                return set()
+
+        for key in (
+            CONF_HOMEKIT_MANAGED_ENTRY_IDS,
+            CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS,
+        ):
+            baseline_ids = _safe_ids(self._defaults.get(key, []))
+            requested_ids = _safe_ids(user_data.get(key, []))
+            latest_ids = _safe_ids(latest.get(key, []))
+            final_ids = (
+                latest_ids | (requested_ids - baseline_ids)
+            ) - (baseline_ids - requested_ids)
+            merged[key] = list(
+                dict.fromkeys(
+                    entry_id
+                    for entry_id in (
+                        *user_data.get(key, []),
+                        *latest.get(key, []),
+                    )
+                    if entry_id in final_ids
+                )
+            )
+        latest_pending = _safe_ids(
+            latest.get(CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS, [])
+        )
+        merged[CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS] = sorted(
+            latest_pending
+            & set(merged[CONF_HOMEKIT_MANAGED_ENTRY_IDS])
+            & set(merged[CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS])
+        )
+        merged[CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS] = sorted(
+            _safe_ids(latest.get(CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS, []))
+        )
+        return self.async_create_entry(data=merged)

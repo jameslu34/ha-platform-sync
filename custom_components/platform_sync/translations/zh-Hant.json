@@ -16,6 +16,7 @@
       "invalid_target": "一個或多個目標平台無效。",
       "invalid_path": "請輸入 Home Assistant 設定目錄內的相對 YAML 路徑。",
       "homekit_entry_required": "請至少選擇一個 HomeKit Bridge 或 Accessory。",
+      "homekit_lifecycle_invalid": "HomeKit 生命週期項目也必須是受管理目標；只有在此明確授權的 accessory 才可自動移除。",
       "homekit_target_entry_not_found": "一個或多個已選的受管理 HomeKit 項目已不存在，請從當前 Bridge／Accessory 重新選擇。",
       "homekit_target_configuration_invalid": "一個或多個已選 HomeKit 目標無法作為精確的 Bridge／Accessory 清單管理。請使用已啟用、由 UI 建立且採明確篩選器的主 Bridge；YAML／匯入項目只能作為固定唯讀的單一實體側項目。",
       "homekit_source_entry_required": "請至少選擇一個 HomeKit Bridge 或 Accessory 作為來源。",
@@ -100,6 +101,9 @@
         "data": {
           "google_config_path": "Google Assistant 裝置設定檔",
           "homekit_managed_entry_ids": "受管理的 HomeKit 目標項目",
+          "homekit_main_entry_id": "HomeKit 主 Bridge",
+          "homekit_lifecycle_entry_ids": "允許外掛建立或移除的 HomeKit accessory",
+          "homekit_accessory_config_path": "匯入式 accessory YAML 檔（選填）",
           "matter_host": "Matterbridge 主機",
           "matter_port": "Matterbridge 連接埠",
           "matter_password": "Matterbridge 密碼（選填）",
@@ -113,6 +117,9 @@
         "data_description": {
           "google_config_path": "由 Google Assistant entity_config 載入的相對 YAML 路徑。Google Home 作為目標時，必須使用此專用檔案並將 expose_by_default 設為 false。",
           "homekit_managed_entry_ids": "選擇此外掛可更新、由 UI 建立的主 Bridge。也可選取可更新的獨立 UI Bridge／Accessory，以及固定唯讀的匯入單實體側項目。",
+          "homekit_main_entry_id": "明確指定受管理清單中的主 Bridge；此外掛只會更新它的整體裝置清單，永遠不會把它當成可自動移除的獨立 accessory。",
+          "homekit_lifecycle_entry_ids": "這是明確刪除授權。只能選 Platform Sync 擁有或你確定要納管的單裝置獨立 accessory；主 Bridge、來源項目與無關 accessory 永遠不會移除。",
+          "homekit_accessory_config_path": "HomeKit YAML 鍵所 include、內容為頂層清單的專用檔相對路徑，例如 homekit_accessories.yaml。要移除納管的匯入式 accessory 前必須設定。",
           "matter_host": "Matterbridge 服務的主機名稱、IP 位址，或完整 ws／wss／http／https 管理端點。",
           "matter_port": "Matterbridge 管理 API 的連接埠。",
           "matter_password": "選填的 Matterbridge 前端密碼；只儲存在 Home Assistant 設定項目中，不會出現在診斷資料。",
@@ -126,7 +133,7 @@
       },
       "confirm": {
         "title": "確認設定",
-        "description": "請確認下列設定。送出最後一步以前，不會變更任何來源或目標平台；送出後，已勾選目標會收斂為精確最終清單，未勾選平台維持不變。\n\n{summary}"
+        "description": "請確認下列設定。送出最後一步以前，不會變更任何來源或目標平台；送出後，已勾選目標會收斂為精確最終清單，未勾選平台維持不變。\n\n{summary}\n\n完成設定後需額外人工配對或確認：\n{manual_pairing}"
       }
     }
   },
@@ -143,6 +150,7 @@
       "invalid_target": "一個或多個目標平台無效。",
       "invalid_path": "請輸入 Home Assistant 設定目錄內的相對 YAML 路徑。",
       "homekit_entry_required": "請至少選擇一個 HomeKit Bridge 或 Accessory。",
+      "homekit_lifecycle_invalid": "HomeKit 生命週期項目也必須是受管理目標；只有在此明確授權的 accessory 才可自動移除。",
       "homekit_target_entry_not_found": "一個或多個已選的受管理 HomeKit 項目已不存在，請從當前 Bridge／Accessory 重新選擇。",
       "homekit_target_configuration_invalid": "一個或多個已選 HomeKit 目標無法作為精確的 Bridge／Accessory 清單管理。請使用已啟用、由 UI 建立且採明確篩選器的主 Bridge；YAML／匯入項目只能作為固定唯讀的單一實體側項目。",
       "homekit_source_entry_required": "請至少選擇一個 HomeKit Bridge 或 Accessory 作為來源。",
@@ -227,6 +235,9 @@
         "data": {
           "google_config_path": "Google Assistant 裝置設定檔",
           "homekit_managed_entry_ids": "受管理的 HomeKit 目標項目",
+          "homekit_main_entry_id": "HomeKit 主 Bridge",
+          "homekit_lifecycle_entry_ids": "允許外掛建立或移除的 HomeKit accessory",
+          "homekit_accessory_config_path": "匯入式 accessory YAML 檔（選填）",
           "matter_host": "Matterbridge 主機",
           "matter_port": "Matterbridge 連接埠",
           "matter_password": "Matterbridge 密碼（選填）",
@@ -240,6 +251,9 @@
         "data_description": {
           "google_config_path": "由 Google Assistant entity_config 載入的相對 YAML 路徑。Google Home 作為目標時，必須使用此專用檔案並將 expose_by_default 設為 false。",
           "homekit_managed_entry_ids": "選擇此外掛可更新、由 UI 建立的主 Bridge。也可選取可更新的獨立 UI Bridge／Accessory，以及固定唯讀的匯入單實體側項目。",
+          "homekit_main_entry_id": "明確指定受管理清單中的主 Bridge；此外掛只會更新它的整體裝置清單，永遠不會把它當成可自動移除的獨立 accessory。",
+          "homekit_lifecycle_entry_ids": "這是明確刪除授權。只能選 Platform Sync 擁有或你確定要納管的單裝置獨立 accessory；主 Bridge、來源項目與無關 accessory 永遠不會移除。",
+          "homekit_accessory_config_path": "HomeKit YAML 鍵所 include、內容為頂層清單的專用檔相對路徑，例如 homekit_accessories.yaml。要移除納管的匯入式 accessory 前必須設定。",
           "matter_host": "Matterbridge 服務的主機名稱、IP 位址，或完整 ws／wss／http／https 管理端點。",
           "matter_port": "Matterbridge 管理 API 的連接埠。",
           "matter_password": "選填的 Matterbridge 前端密碼；只儲存在 Home Assistant 設定項目中，不會出現在診斷資料。",
@@ -253,7 +267,7 @@
       },
       "confirm": {
         "title": "確認設定",
-        "description": "請確認下列設定。送出最後一步以前，不會變更任何來源或目標平台；送出後，已勾選目標會收斂為精確最終清單，未勾選平台維持不變。\n\n{summary}"
+        "description": "請確認下列設定。送出最後一步以前，不會變更任何來源或目標平台；送出後，已勾選目標會收斂為精確最終清單，未勾選平台維持不變。\n\n{summary}\n\n完成設定後需額外人工配對或確認：\n{manual_pairing}"
       }
     }
   },

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 import json
+from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -51,11 +52,22 @@ def extract_dashboard_entities(config: Mapping[str, Any], view_path: str) -> Sou
             current_room = str(value.get("title", room)).strip() if value.get("title") else room
             if value.get("type") == "heading" and isinstance(value.get("heading"), str):
                 current_room = value["heading"].strip()
-            entity_id = value.get("entity")
-            if isinstance(entity_id, str) and "." in entity_id and entity_id not in ordered:
-                ordered.append(entity_id)
-                if current_room:
-                    rooms[entity_id] = current_room
+            for key, entity_id in value.items():
+                if not (
+                    key == "entity"
+                    or key == "camera_image"
+                    or key.endswith("_entity")
+                ):
+                    continue
+                if (
+                    isinstance(entity_id, str)
+                    and "." in entity_id
+                    and " " not in entity_id
+                    and entity_id not in ordered
+                ):
+                    ordered.append(entity_id)
+                    if current_room:
+                        rooms[entity_id] = current_room
             entities = value.get("entities")
             if isinstance(entities, list):
                 for item in entities:
@@ -63,9 +75,26 @@ def extract_dashboard_entities(config: Mapping[str, Any], view_path: str) -> Sou
                         walk({"entity": item}, current_room)
                     else:
                         walk(item, current_room)
-            for key in ("cards", "sections", "badges"):
-                if isinstance(value.get(key), list):
-                    walk_list(value[key], current_room)
+            # Traverse presentation containers, but intentionally ignore
+            # visibility/condition/action mappings: entities used only to gate
+            # or operate a card are not devices displayed by the dashboard.
+            for key in (
+                "cards",
+                "sections",
+                "badges",
+                "elements",
+                "chips",
+                "rows",
+                "features",
+                "card",
+                "header",
+                "footer",
+            ):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    walk_list(nested, current_room)
+                elif isinstance(nested, Mapping):
+                    walk(nested, current_room)
         elif isinstance(value, list):
             walk_list(value, room)
 
@@ -87,6 +116,14 @@ def _select_dashboard_instance(
 async def async_read_dashboard_source(
     hass: HomeAssistant, dashboard: str, view: str
 ) -> SourceSnapshot:
+    config = await _async_read_dashboard_config(hass, dashboard)
+    return extract_dashboard_entities(config, view)
+
+
+async def _async_read_dashboard_config(
+    hass: HomeAssistant, dashboard: str
+) -> Mapping[str, Any]:
+    """Load one named dashboard for one or more selected views."""
     lovelace = hass.data.get("lovelace")
     dashboards = getattr(lovelace, "dashboards", None)
     if dashboards is None and isinstance(lovelace, Mapping):
@@ -96,8 +133,54 @@ async def async_read_dashboard_source(
     instance = _select_dashboard_instance(dashboards, dashboard)
     if instance is None:
         raise ValueError(f"Lovelace dashboard not found: {dashboard}")
-    config = await instance.async_load(False)
-    return extract_dashboard_entities(config, view)
+    return await _async_load_dashboard_config(hass, instance)
+
+
+def _load_storage_dashboard(path: str) -> Mapping[str, Any]:
+    """Load one Lovelace storage document directly from disk."""
+    with Path(path).open(encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, Mapping):
+        raise RuntimeError("Lovelace storage document is not a mapping")
+    data = document.get("data")
+    config = data.get("config") if isinstance(data, Mapping) else None
+    if not isinstance(config, Mapping):
+        raise RuntimeError("Lovelace storage document has no usable config")
+    return config
+
+
+async def _async_load_dashboard_config(
+    hass: HomeAssistant, instance: Any
+) -> Mapping[str, Any]:
+    """Read storage dashboards fresh; use the native loader for YAML mode.
+
+    Home Assistant 2026.9 accepts a ``force`` argument for
+    ``LovelaceStorage.async_load`` but ignores it and returns ``_data`` when the
+    dashboard is already cached. Reading the Core-internal storage key directly
+    keeps the missed-event audit independent from that in-memory cache.
+    """
+    if getattr(instance, "mode", None) != "storage":
+        return await instance.async_load(False)
+
+    try:
+        from homeassistant.components.lovelace.dashboard import (
+            CONFIG_STORAGE_KEY,
+            CONFIG_STORAGE_KEY_DEFAULT,
+        )
+    except (ImportError, AttributeError):
+        raise RuntimeError("Lovelace storage key API is unavailable") from None
+
+    instance_config = getattr(instance, "config", None)
+    if instance_config is None:
+        storage_key = CONFIG_STORAGE_KEY_DEFAULT
+    elif isinstance(instance_config, Mapping) and isinstance(
+        instance_config.get("id"), str
+    ):
+        storage_key = CONFIG_STORAGE_KEY.format(instance_config["id"])
+    else:
+        raise RuntimeError("Lovelace storage dashboard identity is unreadable")
+    storage_path = hass.config.path(".storage", storage_key)
+    return await hass.async_add_executor_job(_load_storage_dashboard, storage_path)
 
 
 async def async_read_dashboard_sources(
@@ -112,8 +195,13 @@ async def async_read_dashboard_sources(
     rooms: dict[str, str] = {}
     room_conflicts: set[str] = set()
     revisions: list[dict[str, str]] = []
+    dashboard_configs: dict[str, Mapping[str, Any]] = {}
     for dashboard, view in selected:
-        snapshot = await async_read_dashboard_source(hass, dashboard, view)
+        if dashboard not in dashboard_configs:
+            dashboard_configs[dashboard] = await _async_read_dashboard_config(
+                hass, dashboard
+            )
+        snapshot = extract_dashboard_entities(dashboard_configs[dashboard], view)
         entities.update(snapshot.entities)
         # Keep room metadata only when every selected page agrees. Conflicting
         # headings must not cause an arbitrary Google Home room reassignment.

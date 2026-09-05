@@ -10,6 +10,7 @@ from homeassistant.helpers import entity_registry as er
 from .config import SyncConfig, normalize_dashboard_pages
 from .const import (
     CONF_ENABLED,
+    CONF_HOMEKIT_MAIN_ENTRY_ID,
     CONF_HOMEKIT_MANAGED_ENTRY_IDS,
     CONF_HOMEKIT_SOURCE_ENTRY_IDS,
     CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION,
@@ -37,6 +38,7 @@ from .const import (
 )
 from .manager import PlatformSyncManager
 from .models import parse_rules, serialize_rules
+from .targets import homekit_managed_main_entry_id
 
 type PlatformSyncConfigEntry = ConfigEntry[PlatformSyncManager]
 
@@ -46,10 +48,10 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 async def async_migrate_entry(
     hass: HomeAssistant, entry: PlatformSyncConfigEntry
 ) -> bool:
-    """Migrate to one master switch, multi-page, and exact HomeKit sources."""
-    if entry.version > 4 or (entry.version == 4 and entry.minor_version > 3):
+    """Migrate to one switch, exact sources, and durable HomeKit identity."""
+    if entry.version > 4 or (entry.version == 4 and entry.minor_version > 4):
         return False
-    if entry.version == 4 and entry.minor_version == 3:
+    if entry.version == 4 and entry.minor_version == 4:
         return True
 
     data = dict(entry.data)
@@ -132,10 +134,38 @@ async def async_migrate_entry(
             data.pop(CONF_ENABLED, None)
             options[CONF_ENABLED] = False
 
-    # Private pre-release builds always excluded Apple TV integration entities
-    # from HomeKit targets. Preserve that behavior for their existing entries
-    # without making it a hidden default for new public installations.
+    # Keep Apple TV integration entities out of HomeKit targets. This is a
+    # fail-safe provenance rule because re-exporting them can create duplicate
+    # or recursive accessories; it also applies to new Config Flow entries.
     data.setdefault(CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION, True)
+
+    # Schema 4.3 inferred the writable main Bridge from its current entity
+    # count. That identity becomes ambiguous as soon as the main Bridge and a
+    # side entry are both singletons. Resolve and durably store the identity
+    # before setup can perform the first target mutation. If the live layout no
+    # longer proves exactly one main Bridge, leave the Config Entry untouched
+    # and require the user to select it explicitly in Options Flow.
+    merged = {**data, **options}
+    targets = set(merged.get(CONF_TARGET_PLATFORMS, []))
+    managed_entry_ids = merged.get(CONF_HOMEKIT_MANAGED_ENTRY_IDS, [])
+    if (
+        TargetPlatform.HOMEKIT.value in targets
+        and managed_entry_ids
+    ):
+        try:
+            migrated_config = SyncConfig.from_entry(data, options)
+            resolved_main_entry_id = homekit_managed_main_entry_id(
+                hass, migrated_config
+            )
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return False
+        if not merged.get(CONF_HOMEKIT_MAIN_ENTRY_ID):
+            if CONF_HOMEKIT_MAIN_ENTRY_ID in options:
+                options[CONF_HOMEKIT_MAIN_ENTRY_ID] = resolved_main_entry_id
+            elif CONF_HOMEKIT_MAIN_ENTRY_ID in data:
+                data[CONF_HOMEKIT_MAIN_ENTRY_ID] = resolved_main_entry_id
+            else:
+                options[CONF_HOMEKIT_MAIN_ENTRY_ID] = resolved_main_entry_id
 
     language = (
         str(getattr(hass.config, "language", "en"))
@@ -153,7 +183,7 @@ async def async_migrate_entry(
         options=options,
         title=title,
         version=4,
-        minor_version=3,
+        minor_version=4,
     )
     return True
 

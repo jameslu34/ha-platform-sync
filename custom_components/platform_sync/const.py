@@ -20,6 +20,11 @@ CONF_MATTER_PASSWORD = "matter_password"
 CONF_GOOGLE_CONFIG_PATH = "google_config_path"
 CONF_HOMEKIT_SOURCE_ENTRY_IDS = "homekit_source_entry_ids"
 CONF_HOMEKIT_MANAGED_ENTRY_IDS = "homekit_managed_entry_ids"
+CONF_HOMEKIT_MAIN_ENTRY_ID = "homekit_main_entry_id"
+CONF_HOMEKIT_LIFECYCLE_ENTRY_IDS = "homekit_lifecycle_entry_ids"
+CONF_HOMEKIT_PENDING_PAIRING_ENTRY_IDS = "homekit_pending_pairing_entry_ids"
+CONF_HOMEKIT_RESTART_REQUIRED_ENTRY_IDS = "homekit_restart_required_entry_ids"
+CONF_HOMEKIT_ACCESSORY_CONFIG_PATH = "homekit_accessory_config_path"
 CONF_USER_RULES = "user_rules"
 CONF_LOCKED_RULES = "locked_rules"
 CONF_LOCKED_HOMEKIT_APPLE_TV_EXCLUSION = "locked_homekit_apple_tv_exclusion"
@@ -33,11 +38,15 @@ DEFAULT_MATTER_HOST = ""
 DEFAULT_MATTER_PORT = 8283
 DEFAULT_MATTER_PASSWORD = ""
 DEFAULT_GOOGLE_CONFIG_PATH = "google_assistant_entity_config.yaml"
+DEFAULT_HOMEKIT_ACCESSORY_CONFIG_PATH = ""
 
 # Internal timing is intentionally not user configurable.  Prefer push events
 # when a source provides them and poll only platform-backed sources that do not.
 INTERNAL_DEBOUNCE_SECONDS = 2
-INTERNAL_POLL_SECONDS = 15
+INTERNAL_POLL_SECONDS = 60
+INTERNAL_SOURCE_AUDIT_SECONDS = 15
+INTERNAL_LIFECYCLE_CONFIRM_SECONDS = 15
+INTERNAL_HEALTH_AUDIT_SECONDS = 300
 INTERNAL_RETRY_SECONDS = 15
 INTERNAL_RETRY_MAX_SECONDS = 300
 INTERNAL_RETRY_DELAYS_SECONDS = (15, 30, 60, 120, 300)

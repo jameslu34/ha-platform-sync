@@ -1,13 +1,13 @@
-"""Tests for pure synchronization rules."""
+"""Dependency-light tests for pure synchronization rules."""
 
-from custom_components.platform_sync.const import TargetPlatform
-from custom_components.platform_sync.models import (
-    PlatformRule,
-    SourceSnapshot,
-    TargetPlan,
-    evaluate_target,
-    normalize_entities,
-)
+from simulate_adapter_acceptance import const, models
+
+TargetPlatform = const.TargetPlatform
+PlatformRule = models.PlatformRule
+SourceSnapshot = models.SourceSnapshot
+TargetPlan = models.TargetPlan
+evaluate_target = models.evaluate_target
+normalize_entities = models.normalize_entities
 
 
 def test_normalize_entities_filters_invalid_values() -> None:
@@ -135,3 +135,36 @@ def test_source_fingerprint_tracks_room_and_order_independent_entities() -> None
         source_revision="one",
     )
     assert first.fingerprint == second.fingerprint
+
+
+def test_every_source_kind_routes_to_every_target_with_exact_rules() -> None:
+    """Exercise the complete 5-source by 3-target compatibility matrix."""
+    for source_kind in const.SourceKind:
+        for target in const.TargetPlatform:
+            source_entity = f"light.from_{source_kind.value}"
+            included = f"switch.include_{target.value}"
+            excluded = f"sensor.exclude_{target.value}"
+            plan = evaluate_target(
+                frozenset({source_entity, excluded}),
+                frozenset({excluded, f"light.stale_{target.value}"}),
+                PlatformRule(
+                    include=frozenset({included}),
+                    exclude=frozenset({excluded}),
+                ),
+                PlatformRule(),
+                target,
+            )
+            assert plan.desired == {source_entity, included}
+            assert plan.added == {source_entity, included}
+            assert plan.removed == {excluded, f"light.stale_{target.value}"}
+
+
+if __name__ == "__main__":
+    tests = [
+        value
+        for name, value in sorted(globals().copy().items())
+        if name.startswith("test_") and callable(value)
+    ]
+    for test in tests:
+        test()
+    print(f"PASS: {len(tests)} pure model tests, including 15 source-target routes")
