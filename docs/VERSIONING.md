@@ -24,5 +24,5 @@ Platform Sync follows these project rules:
    controller acceptance. Record any unavailable controller verification as
    unverified in the release notes.
 
-The latest local tag at the time this policy was last updated was `v0.7.0`; the
+The latest local tag at the time this policy was last updated was `v0.7.1`; the
 authoritative baseline at release time must still be read back from GitHub.

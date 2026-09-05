@@ -1,6 +1,6 @@
 # Cross-Platform Device Sync: Complete User Guide
 
-> Applies to version: 0.7.0
+> Applies to version: 0.7.1
 > English name: Cross-Platform Device Sync
 > Traditional Chinese name: 裝置平台同步
 

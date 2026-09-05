@@ -3887,9 +3887,13 @@ async def check_google_executor_mutation_cancellation() -> int:
 
 
 async def check_single_switch_runtime() -> int:
-    """Version 0.7.0 has one enable switch and no sensor/button platforms."""
+    """Version 0.7.1 has one enable switch and no sensor/button platforms."""
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
-    check(manifest["version"] == "0.7.0", "Manifest version matches the authorized 0.7.0 release")
+    check(manifest["version"] == "0.7.1", "Manifest version matches the 0.7.1 release")
+    check(
+        "google_assistant" in manifest["after_dependencies"],
+        "Native Google imports are declared as an after-dependency",
+    )
     check(const.DEFAULT_ENABLED is False, "New installations default disabled")
     check(const.PLATFORMS == (), "Version 0.4 exposes no sensor/button platforms")
     check(

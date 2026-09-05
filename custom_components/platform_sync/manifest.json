@@ -1,7 +1,7 @@
 {
   "domain": "platform_sync",
   "name": "Cross-Platform Device Sync",
-  "after_dependencies": ["homekit", "lovelace"],
+  "after_dependencies": ["google_assistant", "homekit", "lovelace"],
   "codeowners": ["@jameslu34"],
   "config_flow": true,
   "documentation": "https://github.com/jameslu34/ha-platform-sync",
@@ -10,5 +10,5 @@
   "issue_tracker": "https://github.com/jameslu34/ha-platform-sync/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.7.0"
+  "version": "0.7.1"
 }

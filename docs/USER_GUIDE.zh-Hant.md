@@ -1,6 +1,6 @@
 # 裝置平台同步：完整使用手冊
 
-> 適用版本：0.7.0
+> 適用版本：0.7.1
 > 中文名稱：裝置平台同步
 > English name: Cross-Platform Device Sync
 

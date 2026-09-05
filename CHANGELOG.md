@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-05
+
+### Fixed
+
+- Declare the native Home Assistant Google Assistant integration as an
+  after-dependency now that Platform Sync validates Google SYNC serialization.
+  This preserves optional setup ordering and satisfies hassfest dependency
+  validation.
+
 ## [0.7.0] - 2026-09-05
 
 ### Added
@@ -226,7 +235,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - HACS-compatible repository structure, public documentation, and automated
   validation.
 
-[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jameslu34/ha-platform-sync/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/jameslu34/ha-platform-sync/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/jameslu34/ha-platform-sync/compare/v0.6.3...v0.6.4
